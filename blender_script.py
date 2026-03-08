@@ -46,8 +46,8 @@ PATTERN_COLOR = hex_to_rgba(params["pattern_color"])
 
 # ClothSDK parameters (passed from main.py via cloth_sdk module)
 CLOTH_PARAMS = params.get("cloth_params", {})
-FABRIC_DEFAULTS = {"mass": 0.15, "tension_stiffness": 5.0, "compression_stiffness": 0.0,
-                   "bending_stiffness": 0.005, "tension_damping": 5.0, "compression_damping": 0.0,
+FABRIC_DEFAULTS = {"mass": 0.15, "tension_stiffness": 2.5, "compression_stiffness": 0.0,
+                   "bending_stiffness": 0.001, "tension_damping": 2.5, "compression_damping": 0.0,
                    "bending_damping": 0.5, "friction": 5.0, "self_friction": 5.0,
                    "collision_distance": 0.001, "self_collision_distance": 0.001,
                    "collision_quality": 5, "quality_steps": 10,
@@ -104,12 +104,12 @@ scene.frame_start = 1
 # Dynamic frame count: heavier fabrics need more simulation time to settle
 fabric_mass = CLOTH_PARAMS.get("mass", 0.15)
 if PATTERN_SOURCE == "freesewing":
-    # Sewing approach: GENTLE sewing force needs more time to close seams
-    # Phase 1 (frames 1-80): sewing springs gently pull panels together
-    # Phase 2 (frames 80-140): gravity drapes fabric on body
-    # Phase 3 (frames 140-200): settling into final resting position
-    base_frames = 200
-    extra_frames = int(fabric_mass * 50)
+    # Sewing approach: GENTLE sewing force closes seams then gravity drapes
+    # Phase 1 (frames 1-40): sewing springs pull panels together
+    # Phase 2 (frames 40-70): gravity drapes fabric on body
+    # Phase 3 (frames 70-100): settling into final resting position
+    base_frames = 100
+    extra_frames = int(fabric_mass * 30)
 else:
     base_frames = 80
     extra_frames = int(fabric_mass * 60)  # e.g. velvet (0.5) gets +30 frames
@@ -1335,11 +1335,15 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02)
+
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
 
+    print(f"    [MESH] Final mesh: {len(obj.data.vertices)} verts, "
+          f"{len(obj.data.polygons)} faces (post-sim SubSurf adds smoothness)", flush=True)
+
     # =========================================================================
-    # Step 7: MINIMAL pinning — gravity + mannequin collision does the work
+    # Step 7: MINIMAL pinning
     #
     # Real abayas hang from the shoulders purely by gravity pressing fabric
     # against the body. Over-pinning creates a "wire hanger" effect where
@@ -1622,12 +1626,11 @@ for panel in fabric_panels:
                 print(f"  [SEW] Sewing enabled via {sew_attr}")
                 break
 
-        # DEFLATION FIX: Gentle sewing force prevents slam-bounce airbag
-        # 20.0 yanked panels into mannequin so fast they bounced off
-        # 2.0 pulls gently — seams close over ~80 frames, fabric settles
+        # Sewing force: moderate pull to close seams within ~40 frames
+        # Too high (20) = airbag effect; too low (2) = seams never close in time
         if hasattr(cloth.settings, 'sewing_force_max'):
-            cloth.settings.sewing_force_max = 2.0
-            print(f"  [SEW] Sewing force_max=2.0 (gentle)")
+            cloth.settings.sewing_force_max = 5.0
+            print(f"  [SEW] Sewing force_max=5.0")
         elif hasattr(cloth.settings, 'shrink_min'):
             # Fallback: very mild shrink (NOT -0.3 which compresses violently)
             cloth.settings.shrink_min = -0.05
@@ -1645,9 +1648,17 @@ for panel in fabric_panels:
     # DEFLATION FIX: Minimal collision distance — 1mm invisible shell
     cloth.collision_settings.distance_min = 0.001
     cloth.collision_settings.friction = CLOTH_PARAMS["friction"]
-    cloth.collision_settings.use_self_collision = True
-    cloth.collision_settings.self_distance_min = 0.001
-    cloth.collision_settings.self_friction = CLOTH_PARAMS["self_friction"]
+    # Self-collision: DISABLED for sewing mode — causes Blender crashes
+    # with sewing edges + subdivided panels (physics instability/segfault).
+    # Body collision alone is sufficient — mannequin's collision modifier
+    # prevents fabric from passing through the body.
+    if PATTERN_SOURCE == "freesewing":
+        cloth.collision_settings.use_self_collision = False
+        print(f"  [COLLISION] Self-collision DISABLED (sewing mode — prevents crash)")
+    else:
+        cloth.collision_settings.use_self_collision = True
+        cloth.collision_settings.self_distance_min = 0.001
+        cloth.collision_settings.self_friction = CLOTH_PARAMS["self_friction"]
     cloth.point_cache.frame_start = 1
     cloth.point_cache.frame_end = scene.frame_end
     print(f"  ClothSDK: {panel.name} — mass={CLOTH_PARAMS['mass']}, "

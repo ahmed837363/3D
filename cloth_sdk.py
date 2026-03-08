@@ -40,8 +40,8 @@ class FabricMaterial:
     # Collision
     friction: float = 5.0
     self_friction: float = 5.0
-    collision_distance: float = 0.010
-    self_collision_distance: float = 0.008
+    collision_distance: float = 0.002
+    self_collision_distance: float = 0.003
     collision_quality: int = 5
 
     # Simulation quality (substeps per frame)

@@ -49,7 +49,7 @@ CLOTH_PARAMS = params.get("cloth_params", {})
 FABRIC_DEFAULTS = {"mass": 0.15, "tension_stiffness": 5.0, "compression_stiffness": 5.0,
                    "bending_stiffness": 0.005, "tension_damping": 5.0, "compression_damping": 5.0,
                    "bending_damping": 0.5, "friction": 5.0, "self_friction": 5.0,
-                   "collision_distance": 0.010, "self_collision_distance": 0.008,
+                   "collision_distance": 0.002, "self_collision_distance": 0.003,
                    "collision_quality": 5, "quality_steps": 10,
                    "roughness": 0.7, "sheen": 0.0, "transmission": 0.0}
 for k, v in FABRIC_DEFAULTS.items():
@@ -348,8 +348,8 @@ mannequin.select_set(True)
 
 # Add collision modifier
 bpy.ops.object.modifier_add(type='COLLISION')
-mannequin.collision.thickness_outer = 0.015
-mannequin.collision.thickness_inner = 0.010
+mannequin.collision.thickness_outer = 0.002
+mannequin.collision.thickness_inner = 0.002
 mannequin.collision.cloth_friction = 20.0
 
 # Verify mannequin exists
@@ -1147,7 +1147,7 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
     # Subdivide for smooth cloth sim
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.subdivide(number_cuts=1)
+    bpy.ops.mesh.subdivide(number_cuts=5)
     bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02)
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
@@ -1167,9 +1167,6 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
 
     # Set up pinning — critical for proper draping
     max_z = max(v.co.z for v in obj.data.vertices)
-    min_z = min(v.co.z for v in obj.data.vertices)
-    max_x = max(abs(v.co.x) for v in obj.data.vertices)
-    garment_height = max_z - min_z
     pin_group = obj.vertex_groups.new(name="Pin")
 
     # Pin neckline (top 6cm) with full weight — MUST hold firmly
@@ -1177,27 +1174,18 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
     collar_verts = [v.index for v in obj.data.vertices if v.co.z >= collar_threshold]
     pin_group.add(collar_verts, 1.0, 'ADD')
 
-    # Pin shoulder zone (next 8cm down) with strong weight — garment hangs from here
+    # Pin shoulder zone (next 8cm down) with soft weight — lets fabric drape naturally
     shoulder_bottom = max_z - 0.14
     shoulder_verts = [v.index for v in obj.data.vertices
                       if shoulder_bottom <= v.co.z < collar_threshold]
-    pin_group.add(shoulder_verts, 0.7, 'ADD')
+    pin_group.add(shoulder_verts, 0.3, 'ADD')
 
-    # Light pin for upper chest (next 6cm) to prevent bunching
-    chest_bottom = max_z - 0.20
-    chest_verts = [v.index for v in obj.data.vertices
-                   if chest_bottom <= v.co.z < shoulder_bottom]
-    pin_group.add(chest_verts, 0.15, 'ADD')
-
-    # Pin wrist ends of sleeves (just the very tips)
-    wrist_x_threshold = max_x * 0.92
-    wrist_verts = [v.index for v in obj.data.vertices if abs(v.co.x) >= wrist_x_threshold]
-    pin_group.add(wrist_verts, 0.4, 'ADD')
+    # NOTE: Chest and wrist pins REMOVED — they were suspending fabric mid-air
+    # The garment should hang freely from collar/shoulders under gravity
 
     total = len(obj.data.vertices)
     print(f"  [GARMENT] Abaya ready: {total} verts, "
-          f"{len(collar_verts)} collar + {len(shoulder_verts)} shoulder + "
-          f"{len(chest_verts)} chest + {len(wrist_verts)} wrist pinned", flush=True)
+          f"{len(collar_verts)} collar + {len(shoulder_verts)} shoulder pinned", flush=True)
 
     return obj
 

@@ -60,6 +60,10 @@ PATTERN_SOURCE = params.get("pattern_source", "procedural")  # "procedural" or "
 GARMENT_SIZE = params.get("garment_size", "M")
 GARMENT_HEIGHT = params.get("garment_height", 165.0)  # cm
 
+# Warp XPBD draper — external physics engine (replaces Blender cloth sim)
+USE_WARP = params.get("use_warp_draper", False)
+WARP_PARAMS = params.get("warp_params", {})
+
 # Import FreeSewing pattern system (adjacent to this script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -1463,34 +1467,336 @@ def create_sleeve(name, x_offset):
 print("PROGRESS:11%|Creating fabric panels...")
 sys.stdout.flush()
 
-# Choose pattern source
-if PATTERN_SOURCE == "freesewing":
-    print("  Using FreeSewing (measuring MPFB mannequin)")
+# =============================================================================
+# WARP XPBD PATH — External physics engine for accurate cloth draping
+#
+# When USE_WARP is True:
+#   1. Export mannequin as OBJ for collision
+#   2. Generate FreeSewing pattern data (2D outlines)
+#   3. Call warp_draper.py subprocess (XPBD simulation on CPU)
+#   4. Import the draped OBJ result as static mesh
+#   5. Skip Blender's native cloth modifier entirely
+#
+# This avoids Blender's cloth crash (self-collision + sewing = segfault)
+# and produces more accurate draping via XPBD constraint solver.
+# =============================================================================
+
+warp_draped_obj = None  # Will hold the imported static mesh if Warp path is used
+
+if USE_WARP and PATTERN_SOURCE == "freesewing":
+    import subprocess as _sp
+    import tempfile
+
+    print("  [WARP] Using Warp XPBD external draper", flush=True)
     sys.stdout.flush()
 
-    print("PROGRESS:12%|Creating abaya from mannequin measurements...")
-    # FreeSewing measures the MPFB mannequin directly for perfect fit
-    abaya = create_freesewing_connected_abaya(pattern_data=None, mannequin_obj=mannequin)
-    fabric_panels = [abaya]
-
-else:
-    # Procedural generation
-    print("  Using procedural pattern generation")
+    # --- Step 1: Export mannequin as OBJ ---
+    print("PROGRESS:12%|Exporting mannequin for Warp...", flush=True)
     sys.stdout.flush()
 
-    print("PROGRESS:11%|Stage 1: Creating body tube...")
-    sys.stdout.flush()
-    body = create_body_tube()
+    warp_temp_dir = tempfile.mkdtemp(prefix="warp_drape_")
+    mannequin_obj_path = os.path.join(warp_temp_dir, "mannequin.obj")
 
-    print("PROGRESS:13%|Stage 2: Creating left sleeve...")
-    sys.stdout.flush()
-    l_sleeve = create_sleeve("Abaya_LSleeve", x_offset=0.42)
+    # Select only the mannequin and export
+    bpy.ops.object.select_all(action='DESELECT')
+    mannequin.select_set(True)
+    bpy.context.view_layer.objects.active = mannequin
 
-    print("PROGRESS:14%|Stage 2: Creating right sleeve...")
-    sys.stdout.flush()
-    r_sleeve = create_sleeve("Abaya_RSleeve", x_offset=-0.42)
+    # Blender 5.x OBJ export
+    try:
+        bpy.ops.wm.obj_export(
+            filepath=mannequin_obj_path,
+            export_selected_objects=True,
+            export_uv=False,
+            export_normals=False,
+            export_materials=False,
+            apply_modifiers=True,
+        )
+    except Exception:
+        # Fallback for older Blender versions
+        bpy.ops.export_scene.obj(
+            filepath=mannequin_obj_path,
+            use_selection=True,
+            use_mesh_modifiers=True,
+        )
 
-    fabric_panels = [body, l_sleeve, r_sleeve]
+    print(f"  [WARP] Mannequin exported: {mannequin_obj_path}", flush=True)
+
+    # --- Step 2: Measure body and draft FreeSewing patterns ---
+    print("PROGRESS:13%|Drafting FreeSewing patterns for Warp...", flush=True)
+    sys.stdout.flush()
+
+    body = measure_mannequin_body(mannequin)
+    arm_data = measure_mannequin_arms(mannequin, body)
+
+    fs_measurements = BodyMeasurements.from_mannequin_body(body, arm_data)
+
+    # Abaya ease overrides
+    fs_measurements.chestEase = 30.0
+    fs_measurements.waistEase = 35.0
+    fs_measurements.hipsEase = 30.0
+    fs_measurements.sleeveEase = 18.0
+
+    if GARMENT_HEIGHT and abs(GARMENT_HEIGHT - 165.0) > 1.0:
+        height_scale = GARMENT_HEIGHT / fs_measurements.height
+        fs_measurements.height = GARMENT_HEIGHT
+        fs_measurements.waistToFloor *= height_scale
+        fs_measurements.waistToKnee *= height_scale
+        fs_measurements.hpsToWaistBack *= height_scale
+        fs_measurements.hpsToWaistFront *= height_scale
+        fs_measurements.shoulderToWrist *= height_scale
+        fs_measurements.shoulderToElbow *= height_scale
+
+    drafter = AbayaDrafter(fs_measurements)
+    pieces = drafter.draft_all()
+
+    print(f"  [WARP] Drafted {len(pieces)} pattern pieces", flush=True)
+    for name, piece in pieces.items():
+        bounds = piece.get_bounds()
+        w = bounds[2] - bounds[0]
+        h = bounds[3] - bounds[1]
+        print(f"    {name}: {len(piece.vertices)} verts, {w:.1f} x {h:.1f} cm", flush=True)
+
+    # Export SVG for visualization
+    try:
+        job_id = os.path.basename(OUTPUT_PATH).split('.')[0]
+        svg_dir = os.path.join(os.path.dirname(OUTPUT_PATH), f"{job_id}_patterns")
+        os.makedirs(svg_dir, exist_ok=True)
+        exporter = FreeSewingSVGExporter(pieces)
+        svg_path = exporter.export_combined(os.path.join(svg_dir, "abaya_pattern.svg"))
+        print(f"    SVG exported: {svg_path}", flush=True)
+    except Exception as e:
+        print(f"    SVG export failed (non-critical): {e}", flush=True)
+
+    # --- Step 3: Build panel data for Warp ---
+    print("PROGRESS:14%|Preparing panel data for Warp...", flush=True)
+    sys.stdout.flush()
+
+    shoulder_z = body["shoulder_z"]
+    bust_r = body["bust_r"]
+    body_gap = bust_r + 0.03
+
+    panels_data = {}
+    for piece_name, piece in pieces.items():
+        outline = piece.vertices  # List of (x, y) in cm
+        if not outline or len(outline) < 3:
+            continue
+
+        # Panel positioning (matching create_freesewing_connected_abaya logic)
+        if piece_name == "Front_Bodice":
+            position = [0.0, -body_gap, shoulder_z + 0.05]
+            rotation = [0.0, 0.0, 0.0]
+        elif piece_name == "Back_Bodice":
+            position = [0.0, body_gap, shoulder_z + 0.05]
+            rotation = [0.0, 0.0, math.pi]
+        elif piece_name == "Left_Sleeve":
+            arm_x = arm_data["left_arm_start"]
+            arm_z = arm_data["left_arm_z"]
+            position = [arm_x + 0.05, 0.0, arm_z + 0.05]
+            rotation = [0.0, 0.0, math.pi / 2]
+        elif piece_name == "Right_Sleeve":
+            arm_x = arm_data["right_arm_start"]
+            arm_z = arm_data["right_arm_z"]
+            position = [arm_x - 0.05, 0.0, arm_z + 0.05]
+            rotation = [0.0, 0.0, -math.pi / 2]
+        else:
+            position = [0.0, 0.0, shoulder_z]
+            rotation = [0.0, 0.0, 0.0]
+
+        panels_data[piece_name] = {
+            "outline": outline,
+            "position": position,
+            "rotation": rotation,
+        }
+
+    # Seam pairs
+    seam_pairs = [
+        ["Front_Bodice", "Back_Bodice", "side"],
+        ["Front_Bodice", "Left_Sleeve", "armhole"],
+        ["Front_Bodice", "Right_Sleeve", "armhole"],
+        ["Back_Bodice", "Left_Sleeve", "armhole"],
+        ["Back_Bodice", "Right_Sleeve", "armhole"],
+    ]
+
+    # Fabric XPBD params (from WARP_PARAMS or defaults)
+    warp_fabric = WARP_PARAMS if WARP_PARAMS else {
+        "mass": CLOTH_PARAMS.get("mass", 0.15),
+        "stretch_compliance": 0.001 / max(CLOTH_PARAMS.get("tension_stiffness", 2.5), 0.01),
+        "bend_compliance": 0.001 / max(CLOTH_PARAMS.get("bending_stiffness", 0.001), 0.0001),
+        "collision_margin": 0.003,
+        "damping": 0.02,
+        "sewing_stiffness": 10.0,
+    }
+
+    # Sim configuration
+    sim_config = {
+        "steps": 200,
+        "substeps": 8,
+        "dt": 1.0 / 60.0,
+        "sewing_steps": 80,
+    }
+
+    draped_obj_path = os.path.join(warp_temp_dir, "draped_garment.obj")
+
+    warp_job = {
+        "mannequin_obj": mannequin_obj_path,
+        "panels": panels_data,
+        "fabric": warp_fabric,
+        "seam_pairs": seam_pairs,
+        "output_obj": draped_obj_path,
+        "sim_config": sim_config,
+    }
+
+    warp_params_path = os.path.join(warp_temp_dir, "warp_params.json")
+    with open(warp_params_path, 'w') as f:
+        json.dump(warp_job, f, indent=2)
+
+    # --- Step 4: Run Warp XPBD draper subprocess ---
+    print("PROGRESS:15%|Running Warp XPBD simulation...", flush=True)
+    sys.stdout.flush()
+
+    warp_script = os.path.join(SCRIPT_DIR, "warp_draper.py")
+
+    # Use the system Python (not Blender's bundled Python) for Warp
+    # since warp-lang is installed in the system/venv Python
+    python_exe = sys.executable  # Will be Blender's Python
+    # Try to find the venv Python instead
+    venv_python = os.path.join(SCRIPT_DIR, "venv", "Scripts", "python.exe")
+    system_python = "python"
+    if os.path.exists(venv_python):
+        python_exe = venv_python
+    else:
+        python_exe = system_python
+
+    print(f"  [WARP] Python: {python_exe}", flush=True)
+    print(f"  [WARP] Script: {warp_script}", flush=True)
+    print(f"  [WARP] Params: {warp_params_path}", flush=True)
+
+    try:
+        warp_env = os.environ.copy()
+        warp_env["PYTHONUNBUFFERED"] = "1"
+
+        warp_proc = _sp.Popen(
+            [python_exe, warp_script, warp_params_path],
+            stdout=_sp.PIPE,
+            stderr=_sp.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',  # Handle Warp's non-UTF8 output (× symbols etc)
+            bufsize=1,
+            cwd=SCRIPT_DIR,
+            env=warp_env,
+        )
+
+        # Stream Warp output and forward progress
+        for line in warp_proc.stdout:
+            line = line.rstrip()
+            if line.startswith("PROGRESS:"):
+                # Scale Warp's 0-100% progress to our 15-70% range
+                try:
+                    pct_str = line.split("%|")[0].replace("PROGRESS:", "")
+                    warp_pct = int(pct_str)
+                    scaled_pct = 15 + int(warp_pct * 0.55)  # 15% to 70%
+                    msg = line.split("|", 1)[1] if "|" in line else ""
+                    print(f"PROGRESS:{scaled_pct}%|[WARP] {msg}", flush=True)
+                except (ValueError, IndexError):
+                    print(f"  {line}", flush=True)
+            else:
+                print(f"  {line}", flush=True)
+            sys.stdout.flush()
+
+        warp_proc.wait()
+
+        if warp_proc.returncode != 0:
+            print(f"  [WARP] ERROR: Warp draper exited with code {warp_proc.returncode}", flush=True)
+            print(f"  [WARP] Falling back to Blender cloth simulation...", flush=True)
+            USE_WARP_SUCCESS = False
+        elif not os.path.exists(draped_obj_path):
+            print(f"  [WARP] ERROR: No output file at {draped_obj_path}", flush=True)
+            print(f"  [WARP] Falling back to Blender cloth simulation...", flush=True)
+            USE_WARP_SUCCESS = False
+        else:
+            USE_WARP_SUCCESS = True
+            print(f"  [WARP] Draping complete! Importing result...", flush=True)
+
+    except FileNotFoundError:
+        print(f"  [WARP] ERROR: Python not found at {python_exe}", flush=True)
+        print(f"  [WARP] Falling back to Blender cloth simulation...", flush=True)
+        USE_WARP_SUCCESS = False
+    except Exception as e:
+        print(f"  [WARP] ERROR: {e}", flush=True)
+        print(f"  [WARP] Falling back to Blender cloth simulation...", flush=True)
+        USE_WARP_SUCCESS = False
+
+    # --- Step 5: Import draped OBJ into Blender ---
+    if USE_WARP_SUCCESS:
+        print("PROGRESS:72%|Importing draped garment...", flush=True)
+        sys.stdout.flush()
+
+        try:
+            bpy.ops.wm.obj_import(filepath=draped_obj_path)
+        except Exception:
+            bpy.ops.import_scene.obj(filepath=draped_obj_path)
+
+        # Find the imported object
+        imported_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+        if imported_objs:
+            warp_draped_obj = imported_objs[0]
+            warp_draped_obj.name = "Abaya_Draped"
+            fabric_panels = [warp_draped_obj]
+
+            # Smooth shading
+            bpy.context.view_layer.objects.active = warp_draped_obj
+            warp_draped_obj.select_set(True)
+            bpy.ops.object.shade_smooth()
+
+            print(f"  [WARP] Imported: {warp_draped_obj.name}, "
+                  f"{len(warp_draped_obj.data.vertices)} verts", flush=True)
+        else:
+            print(f"  [WARP] ERROR: No mesh imported from OBJ", flush=True)
+            USE_WARP_SUCCESS = False
+
+    # Clean up temp files (optional — keep for debugging)
+    # import shutil
+    # shutil.rmtree(warp_temp_dir, ignore_errors=True)
+
+    # If Warp failed, fall through to Blender cloth path below
+    if not USE_WARP_SUCCESS:
+        USE_WARP = False  # Reset so the cloth sim path runs
+
+# =============================================================================
+# BLENDER CLOTH PATH — Fallback when Warp is not available or fails
+# =============================================================================
+
+if not USE_WARP or (USE_WARP and PATTERN_SOURCE != "freesewing"):
+    # Choose pattern source
+    if PATTERN_SOURCE == "freesewing":
+        print("  Using FreeSewing (measuring MPFB mannequin)")
+        sys.stdout.flush()
+
+        print("PROGRESS:12%|Creating abaya from mannequin measurements...")
+        # FreeSewing measures the MPFB mannequin directly for perfect fit
+        abaya = create_freesewing_connected_abaya(pattern_data=None, mannequin_obj=mannequin)
+        fabric_panels = [abaya]
+
+    else:
+        # Procedural generation
+        print("  Using procedural pattern generation")
+        sys.stdout.flush()
+
+        print("PROGRESS:11%|Stage 1: Creating body tube...")
+        sys.stdout.flush()
+        body = create_body_tube()
+
+        print("PROGRESS:13%|Stage 2: Creating left sleeve...")
+        sys.stdout.flush()
+        l_sleeve = create_sleeve("Abaya_LSleeve", x_offset=0.42)
+
+        print("PROGRESS:14%|Stage 2: Creating right sleeve...")
+        sys.stdout.flush()
+        r_sleeve = create_sleeve("Abaya_RSleeve", x_offset=-0.42)
+
+        fabric_panels = [body, l_sleeve, r_sleeve]
 
 print(f"PROGRESS:15%|{len(fabric_panels)} fabric panels ready")
 sys.stdout.flush()
@@ -1588,8 +1894,16 @@ fabric_mat = create_fabric_material()
 print("PROGRESS:19%|Applying material & cloth physics...")
 sys.stdout.flush()
 
+# Determine if we need Blender cloth physics
+need_cloth_sim = (warp_draped_obj is None)  # Warp path sets this when successful
+
 for panel in fabric_panels:
     panel.data.materials.append(fabric_mat)
+
+    if not need_cloth_sim:
+        # Warp path: static mesh — no cloth modifier needed
+        print(f"  [WARP] Applied material to {panel.name} (static — no cloth sim)", flush=True)
+        continue
 
     bpy.context.view_layer.objects.active = panel
     bpy.ops.object.modifier_add(type='CLOTH')
@@ -1678,40 +1992,44 @@ gmat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.
 ground.data.materials.append(gmat)
 
 
-# --- Bake simulation ---
-print("PROGRESS:22%|Simulating cloth physics...")
-print(f"  [SIM] Starting simulation: {scene.frame_end} frames, {len(fabric_panels)} panels", flush=True)
-sys.stdout.flush()
-
-sim_start_time = time.time()
-
-bpy.ops.ptcache.free_bake_all()
-total_frames = scene.frame_end - scene.frame_start + 1
-
-for frame in range(scene.frame_start, scene.frame_end + 1):
-    scene.frame_set(frame)
-    bpy.context.view_layer.update()
-
-    current_time = time.time()
-    elapsed = current_time - sim_start_time
-
-    # Simulation is 22% to 75% of total progress
-    sim_pct = 22 + int(((frame - scene.frame_start) / total_frames) * 53)
-
-    # Log every frame but with timing info every 10 frames
-    if frame % 10 == 0 or frame == scene.frame_end:
-        frames_done = frame - scene.frame_start + 1
-        fps = frames_done / elapsed if elapsed > 0 else 0
-        eta = (total_frames - frames_done) / fps if fps > 0 else 0
-        print(f"PROGRESS:{sim_pct}%|Frame {frame}/{scene.frame_end} ({fps:.1f} fps, ETA: {eta:.0f}s)")
-    else:
-        print(f"PROGRESS:{sim_pct}%|Frame {frame}/{scene.frame_end}")
+if need_cloth_sim:
+    # --- Bake simulation (Blender cloth path only) ---
+    print("PROGRESS:22%|Simulating cloth physics...")
+    print(f"  [SIM] Starting simulation: {scene.frame_end} frames, {len(fabric_panels)} panels", flush=True)
     sys.stdout.flush()
 
-scene.frame_set(scene.frame_end)
-sim_elapsed = time.time() - sim_start_time
-print(f"PROGRESS:75%|Simulation complete ({sim_elapsed:.1f}s)")
-print(f"  [SIM] Finished in {sim_elapsed:.1f} seconds", flush=True)
+    sim_start_time = time.time()
+
+    bpy.ops.ptcache.free_bake_all()
+    total_frames = scene.frame_end - scene.frame_start + 1
+
+    for frame in range(scene.frame_start, scene.frame_end + 1):
+        scene.frame_set(frame)
+        bpy.context.view_layer.update()
+
+        current_time = time.time()
+        elapsed = current_time - sim_start_time
+
+        # Simulation is 22% to 75% of total progress
+        sim_pct = 22 + int(((frame - scene.frame_start) / total_frames) * 53)
+
+        # Log every frame but with timing info every 10 frames
+        if frame % 10 == 0 or frame == scene.frame_end:
+            frames_done = frame - scene.frame_start + 1
+            fps = frames_done / elapsed if elapsed > 0 else 0
+            eta = (total_frames - frames_done) / fps if fps > 0 else 0
+            print(f"PROGRESS:{sim_pct}%|Frame {frame}/{scene.frame_end} ({fps:.1f} fps, ETA: {eta:.0f}s)")
+        else:
+            print(f"PROGRESS:{sim_pct}%|Frame {frame}/{scene.frame_end}")
+        sys.stdout.flush()
+
+    scene.frame_set(scene.frame_end)
+    sim_elapsed = time.time() - sim_start_time
+    print(f"PROGRESS:75%|Simulation complete ({sim_elapsed:.1f}s)")
+    print(f"  [SIM] Finished in {sim_elapsed:.1f} seconds", flush=True)
+else:
+    print("PROGRESS:75%|Warp draping complete (no Blender sim needed)")
+    sys.stdout.flush()
 
 # Add Subdivision Surface modifier AFTER cloth simulation for smooth render
 print("  [SMOOTH] Adding subdivision surface for smooth rendering...", flush=True)

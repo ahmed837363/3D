@@ -51,6 +51,16 @@ params = {
     "pattern_source": "freesewing",
     "garment_size": "M",
     "garment_height": 165.0,
+    # Warp XPBD draper (external physics engine)
+    "use_warp_draper": True,
+    "warp_params": {
+        "mass": 0.15,
+        "stretch_compliance": 0.0004,
+        "bend_compliance": 1.0,
+        "collision_margin": 0.003,
+        "damping": 0.02,
+        "sewing_stiffness": 10.0,
+    },
 }
 
 log_path = os.path.join(BASE_DIR, "_test_log.txt")

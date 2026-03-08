@@ -78,6 +78,41 @@ class FabricMaterial:
             "transmission": self.transmission,
         }
 
+    def to_warp_params(self) -> dict:
+        """
+        Export parameters for Warp XPBD cloth simulation.
+
+        Converts Blender-style stiffness values to XPBD compliance:
+          compliance = 1.0 / stiffness  (lower compliance = stiffer)
+
+        XPBD compliance has units of 1/(force·time²), so we scale
+        relative to Blender's arbitrary stiffness units.
+        """
+        # Stretch compliance: inverse of tension stiffness
+        # Blender tension_stiffness ~2.5 for crepe → compliance ~0.0004
+        stretch_c = 0.001 / max(self.tension_stiffness, 0.01)
+
+        # Bend compliance: inverse of bending stiffness
+        # Blender bending_stiffness ~0.001 for soft crepe → compliance ~1.0
+        bend_c = 0.001 / max(self.bending_stiffness, 0.0001)
+
+        # Damping: convert from Blender's damping values to 0-1 range
+        damping = min(0.1, (self.tension_damping + self.bending_damping) / 100.0)
+
+        return {
+            "mass": self.mass,
+            "stretch_compliance": stretch_c,
+            "bend_compliance": bend_c,
+            "collision_margin": max(self.collision_distance, 0.002),
+            "damping": damping,
+            "friction": self.friction,
+            "sewing_stiffness": 10.0,  # Standard sewing pull force
+            # Rendering params (passed through to Blender)
+            "roughness": self.roughness,
+            "sheen": self.sheen,
+            "transmission": self.transmission,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Fabric presets — tuned for abaya garment simulation

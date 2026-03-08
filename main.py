@@ -702,6 +702,9 @@ class MainWindow(QMainWindow):
             # Size and height for FreeSewing
             "garment_size": self.size_combo.currentText(),
             "garment_height": self.height_spin.value(),
+            # Warp XPBD draper (external physics engine — more accurate, no crashes)
+            "use_warp_draper": (pattern_source == "freesewing"),
+            "warp_params": fabric.to_warp_params(),
         }
         self.last_blend_path = blend_path
 

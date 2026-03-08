@@ -104,8 +104,11 @@ scene.frame_start = 1
 # Dynamic frame count: heavier fabrics need more simulation time to settle
 fabric_mass = CLOTH_PARAMS.get("mass", 0.15)
 if PATTERN_SOURCE == "freesewing":
-    # Sewing approach: panels need time to be pulled together + settling
-    base_frames = 100
+    # Sewing approach: wider panels need more time to pull together + settle
+    # Phase 1 (frames 1-60): sewing springs pull panels together
+    # Phase 2 (frames 60-100): gravity drapes fabric on body
+    # Phase 3 (frames 100-140): settling into final position
+    base_frames = 140
     extra_frames = int(fabric_mass * 50)
 else:
     base_frames = 80
@@ -346,11 +349,12 @@ if mannequin.name not in bpy.context.collection.objects:
 bpy.context.view_layer.objects.active = mannequin
 mannequin.select_set(True)
 
-# Add collision modifier
+# Add collision modifier — HIGH FRICTION is critical with minimal pinning
+# The fabric must grip the mannequin's shoulders via collision, not pins
 bpy.ops.object.modifier_add(type='COLLISION')
 mannequin.collision.thickness_outer = 0.002
 mannequin.collision.thickness_inner = 0.002
-mannequin.collision.cloth_friction = 20.0
+mannequin.collision.cloth_friction = 80.0  # High friction — fabric grips shoulders
 
 # Verify mannequin exists
 print(f"  Mannequin: {mannequin.name}, {len(mannequin.data.vertices)} verts", flush=True)
@@ -1140,6 +1144,20 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
 
     fs_measurements = BodyMeasurements.from_mannequin_body(body, arm_data)
 
+    # =========================================================================
+    # ABAYA EASE OVERRIDE — Force loose, flowing silhouette
+    #
+    # Real abayas have 25-35cm of extra width at chest/waist/hips.
+    # The default FreeSewing ease (16/20/18cm) is for fitted garments.
+    # We override with proper abaya ease so the panels are wide enough
+    # to billow and create elegant vertical folds when gravity pulls them.
+    # =========================================================================
+    fs_measurements.chestEase = 30.0    # +30cm chest (was 16)
+    fs_measurements.waistEase = 35.0    # +35cm waist (was 20) — abayas are very loose here
+    fs_measurements.hipsEase = 30.0     # +30cm hips (was 18)
+    fs_measurements.sleeveEase = 18.0   # +18cm sleeves (was 12) — flowing sleeves
+    print(f"    [EASE] Abaya ease applied: chest+30, waist+35, hips+30, sleeve+18", flush=True)
+
     if GARMENT_HEIGHT and abs(GARMENT_HEIGHT - 165.0) > 1.0:
         height_scale = GARMENT_HEIGHT / fs_measurements.height
         fs_measurements.height = GARMENT_HEIGHT
@@ -1320,25 +1338,41 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
     bpy.ops.object.shade_smooth()
 
     # =========================================================================
-    # Step 7: Pin neckline — only the collar holds the garment up
+    # Step 7: MINIMAL pinning — gravity + mannequin collision does the work
+    #
+    # Real abayas hang from the shoulders purely by gravity pressing fabric
+    # against the body. Over-pinning creates a "wire hanger" effect where
+    # the top of the garment is frozen rigid in mid-air.
+    #
+    # We pin ONLY a handful of vertices at the very back of the neckline —
+    # just enough to prevent the garment from sliding off entirely.
+    # The MPFB mannequin's collision modifier (with high friction) handles
+    # keeping the fabric draped on the shoulders naturally.
     # =========================================================================
     max_z = max(v.co.z for v in obj.data.vertices)
     pin_group = obj.vertex_groups.new(name="Pin")
 
-    # Pin neckline (top 5% of garment) with full weight
-    collar_threshold = max_z - 0.04
+    # Pin ONLY the very top neckline vertices (top 1.5cm)
+    collar_threshold = max_z - 0.015
     collar_verts = [v.index for v in obj.data.vertices if v.co.z >= collar_threshold]
-    pin_group.add(collar_verts, 1.0, 'ADD')
 
-    # Light shoulder pin for stability during sewing phase
-    shoulder_bottom = max_z - 0.10
-    shoulder_verts = [v.index for v in obj.data.vertices
-                      if shoulder_bottom <= v.co.z < collar_threshold]
-    pin_group.add(shoulder_verts, 0.2, 'ADD')
+    # Narrow to back-of-neck only (Y > 0) if too many
+    if len(collar_verts) > 20:
+        collar_verts = [v.index for v in obj.data.vertices
+                        if v.co.z >= collar_threshold and v.co.y > 0]
+
+    # Cap at 8 verts max — take only the very highest
+    if len(collar_verts) > 8:
+        sorted_by_z = sorted(collar_verts,
+                             key=lambda i: obj.data.vertices[i].co.z,
+                             reverse=True)
+        collar_verts = sorted_by_z[:8]
+
+    pin_group.add(collar_verts, 1.0, 'ADD')
 
     total = len(obj.data.vertices)
     print(f"  [SEWING] Abaya ready: {total} verts, "
-          f"{len(collar_verts)} collar + {len(shoulder_verts)} shoulder pinned, "
+          f"{len(collar_verts)} neck-pin verts (minimal), "
           f"{sew_count} sewing edges", flush=True)
 
     return obj
@@ -1580,8 +1614,8 @@ for panel in fabric_panels:
                 break
 
         if hasattr(cloth.settings, 'sewing_force_max'):
-            cloth.settings.sewing_force_max = 15.0
-            print(f"  [SEW] Sewing force_max=15.0")
+            cloth.settings.sewing_force_max = 20.0  # Stronger pull for wider abaya panels
+            print(f"  [SEW] Sewing force_max=20.0")
         elif hasattr(cloth.settings, 'shrink_min'):
             # Fallback: use shrink to pull fabric closer
             cloth.settings.shrink_min = -0.3

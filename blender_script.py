@@ -104,9 +104,9 @@ scene.frame_start = 1
 # Dynamic frame count: heavier fabrics need more simulation time to settle
 fabric_mass = CLOTH_PARAMS.get("mass", 0.15)
 if PATTERN_SOURCE == "freesewing":
-    # Garment tube with small ease starts close to body — needs less settling time
-    base_frames = 60
-    extra_frames = int(fabric_mass * 40)
+    # Sewing approach: panels need time to be pulled together + settling
+    base_frames = 100
+    extra_frames = int(fabric_mass * 50)
 else:
     base_frames = 80
     extra_frames = int(fabric_mass * 60)  # e.g. velvet (0.5) gets +30 frames
@@ -902,18 +902,228 @@ def create_sleeve_mesh(bm, side: str, arm_start: float, arm_end: float, arm_z: f
     return all_sleeve_rings
 
 
+def create_flat_panel_from_outline(name, outline_2d, subdivisions=2):
+    """
+    Create a FLAT filled mesh panel from a 2D FreeSewing outline.
+
+    Takes outline vertices in cm (x, y) where y is height,
+    creates a filled polygon in Blender's XZ plane (Y=0),
+    and subdivides for cloth simulation.
+
+    Returns the Blender mesh object.
+    """
+    # Convert outline from cm to meters, map to XZ plane (Y=0)
+    # FreeSewing: (x_cm, y_cm) → Blender: (x_m, 0, -y_m)
+    # y in pattern = distance from top, so negate for Z (height grows up)
+    outline_3d = [(x / 100.0, 0.0, -y / 100.0) for x, y in outline_2d]
+
+    if len(outline_3d) < 3:
+        print(f"    [PANEL] ERROR: Not enough vertices for {name}", flush=True)
+        return None
+
+    bm = bmesh.new()
+
+    # Create outline vertices
+    bm_verts = []
+    for co in outline_3d:
+        v = bm.verts.new(co)
+        bm_verts.append(v)
+    bm.verts.ensure_lookup_table()
+
+    # Create edges forming the outline loop
+    for i in range(len(bm_verts)):
+        bm.edges.new([bm_verts[i], bm_verts[(i + 1) % len(bm_verts)]])
+    bm.edges.ensure_lookup_table()
+
+    # Fill the outline to create a face
+    # Use edgeloop fill for the single closed boundary
+    try:
+        result = bmesh.ops.triangle_fill(bm, use_beauty=True,
+                                         use_dissolve=False,
+                                         edges=bm.edges[:])
+        if not result['geom']:
+            # Fallback: try contextual fill
+            bmesh.ops.contextual_create(bm, geom=bm.verts[:] + bm.edges[:])
+    except Exception as e:
+        print(f"    [PANEL] triangle_fill failed for {name}: {e}, trying contextual_create", flush=True)
+        try:
+            bmesh.ops.contextual_create(bm, geom=bm.verts[:] + bm.edges[:])
+        except Exception as e2:
+            print(f"    [PANEL] contextual_create also failed: {e2}", flush=True)
+
+    # Subdivide for cloth simulation density
+    if subdivisions > 0 and len(bm.faces) > 0:
+        bmesh.ops.subdivide_edges(bm,
+                                  edges=bm.edges[:],
+                                  cuts=subdivisions,
+                                  use_grid_fill=True)
+
+    bm.faces.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+
+    # Create Blender object
+    mesh = bpy.data.meshes.new(f"{name}_Mesh")
+    bm.to_mesh(mesh)
+    bm.free()
+
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+
+    # UV unwrap
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    bpy.ops.object.shade_smooth()
+    print(f"    [PANEL] {name}: {len(obj.data.vertices)} verts, "
+          f"{len(obj.data.polygons)} faces", flush=True)
+    return obj
+
+
+def create_sewing_edges(obj, panel_bounds, seam_pairs):
+    """
+    Create sewing edges between panels by bridging matching boundary edges
+    and then deleting the bridge faces, leaving only naked sewing edges.
+
+    Blender's cloth sewing engine uses these naked edges as invisible threads
+    to pull flat panels together — exactly like real tailoring.
+
+    Args:
+        obj: The joined mesh object containing all panels
+        panel_bounds: Dict mapping panel name → (boundary_verts_indices, y_offset)
+        seam_pairs: List of (panel_a_name, panel_b_name, seam_type) tuples
+    """
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+
+    # Find boundary edges (edges with only 1 face)
+    boundary_edges = [e for e in bm.edges if len(e.link_faces) <= 1]
+    print(f"    [SEW] Found {len(boundary_edges)} boundary edges", flush=True)
+
+    sewing_edges_created = 0
+
+    for panel_a, panel_b, seam_type in seam_pairs:
+        bounds_a = panel_bounds.get(panel_a)
+        bounds_b = panel_bounds.get(panel_b)
+        if not bounds_a or not bounds_b:
+            continue
+
+        a_verts_set, a_y = bounds_a
+        b_verts_set, b_y = bounds_b
+
+        # Get boundary edges belonging to each panel
+        a_boundary = []
+        b_boundary = []
+        for e in boundary_edges:
+            v0_idx = e.verts[0].index
+            v1_idx = e.verts[1].index
+            if v0_idx in a_verts_set and v1_idx in a_verts_set:
+                a_boundary.append(e)
+            elif v0_idx in b_verts_set and v1_idx in b_verts_set:
+                b_boundary.append(e)
+
+        if seam_type == "side":
+            # Side seam: match right edge of front to right edge of back
+            # (or left edge to left edge)
+            # Side edges are the ones furthest from center (max |x|)
+            a_side = [e for e in a_boundary
+                      if all(abs(e.verts[i].co.x) > 0.05 for i in range(2))]
+            b_side = [e for e in b_boundary
+                      if all(abs(e.verts[i].co.x) > 0.05 for i in range(2))]
+
+            # Match by Z height proximity
+            for ea in a_side:
+                ea_z = (ea.verts[0].co.z + ea.verts[1].co.z) / 2
+                ea_x_sign = 1 if (ea.verts[0].co.x + ea.verts[1].co.x) > 0 else -1
+                best_eb = None
+                best_dist = float('inf')
+                for eb in b_side:
+                    eb_x_sign = 1 if (eb.verts[0].co.x + eb.verts[1].co.x) > 0 else -1
+                    if ea_x_sign != eb_x_sign:
+                        continue  # Must be same side (left-left or right-right)
+                    eb_z = (eb.verts[0].co.z + eb.verts[1].co.z) / 2
+                    dist = abs(ea_z - eb_z)
+                    if dist < best_dist and dist < 0.05:  # 5cm tolerance
+                        best_dist = dist
+                        best_eb = eb
+
+                if best_eb is not None:
+                    # Create sewing edge: connect midpoints with a naked edge
+                    mid_a = (ea.verts[0].co + ea.verts[1].co) / 2
+                    mid_b = (best_eb.verts[0].co + best_eb.verts[1].co) / 2
+                    # Connect closest vertex pairs
+                    for va in ea.verts:
+                        closest_vb = min(best_eb.verts, key=lambda vb: (va.co - vb.co).length)
+                        if (va.co - closest_vb.co).length < 0.5:  # Max 50cm
+                            try:
+                                bm.edges.new([va, closest_vb])
+                                sewing_edges_created += 1
+                            except ValueError:
+                                pass  # Edge already exists
+
+        elif seam_type == "armhole":
+            # Armhole: match sleeve cap edges to bodice armhole edges
+            # Sleeve boundary edges are those near the shoulder height
+            for ea in a_boundary:
+                ea_z = (ea.verts[0].co.z + ea.verts[1].co.z) / 2
+                best_eb = None
+                best_dist = float('inf')
+                for eb in b_boundary:
+                    eb_z = (eb.verts[0].co.z + eb.verts[1].co.z) / 2
+                    # Match by Z height and X proximity
+                    dist = math.sqrt((ea_z - eb_z)**2)
+                    ea_x = (ea.verts[0].co.x + ea.verts[1].co.x) / 2
+                    eb_x = (eb.verts[0].co.x + eb.verts[1].co.x) / 2
+                    x_dist = abs(ea_x - eb_x)
+                    if dist < 0.05 and x_dist < 0.3:
+                        total_dist = dist + x_dist * 0.5
+                        if total_dist < best_dist:
+                            best_dist = total_dist
+                            best_eb = eb
+
+                if best_eb is not None:
+                    for va in ea.verts:
+                        closest_vb = min(best_eb.verts,
+                                         key=lambda vb: (va.co - vb.co).length)
+                        if (va.co - closest_vb.co).length < 0.4:
+                            try:
+                                bm.edges.new([va, closest_vb])
+                                sewing_edges_created += 1
+                            except ValueError:
+                                pass
+
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+    print(f"    [SEW] Created {sewing_edges_created} sewing edges", flush=True)
+    return sewing_edges_created
+
+
 def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> object:
     """
-    Create abaya using SHRINKWRAP PRE-POSITIONING + cloth simulation.
+    Create abaya using FLAT PANEL SEWING approach.
 
-    Professional garment simulation approach:
+    Professional garment simulation — mimics real tailoring:
     1. Measure mannequin body at key landmarks
-    2. Create body-conforming tube with minimal ease
-    3. SHRINKWRAP upper body onto mannequin surface (key technique!)
-    4. Cloth sim then does fine draping from that close starting position
+    2. Draft FreeSewing pattern pieces (mathematically accurate 2D panels)
+    3. Create FLAT mesh panels from the pattern outlines
+    4. Position panels around the mannequin (front, back, sleeves)
+    5. Create sewing edges between matching panel boundaries
+    6. Blender's cloth sewing engine pulls panels together like real stitching
+    7. Gravity + collision = natural draping with seam-driven folds
 
-    The shrinkwrap prevents the 'bag collapse' — the garment starts
-    conforming to the body instead of falling under gravity.
+    This replaces the old procedural tube approach that ignored the FreeSewing
+    pattern data entirely.
     """
     if mannequin_obj is None:
         raise ValueError("Mannequin required for automatic measurements")
@@ -924,268 +1134,212 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
     body = measure_mannequin_body(mannequin_obj)
     arm_data = measure_mannequin_arms(mannequin_obj, body)
 
-    # Step 2: FreeSewing pattern generation (for SVG export & validation)
-    if FREESEWING_AVAILABLE:
-        fs_measurements = BodyMeasurements.from_mannequin_body(body, arm_data)
+    # Step 2: FreeSewing pattern generation
+    if not FREESEWING_AVAILABLE:
+        raise RuntimeError("FreeSewing pattern system required for sewing approach")
 
-        if GARMENT_HEIGHT and abs(GARMENT_HEIGHT - 165.0) > 1.0:
-            height_scale = GARMENT_HEIGHT / fs_measurements.height
-            fs_measurements.height = GARMENT_HEIGHT
-            fs_measurements.waistToFloor *= height_scale
-            fs_measurements.waistToKnee *= height_scale
-            fs_measurements.hpsToWaistBack *= height_scale
-            fs_measurements.hpsToWaistFront *= height_scale
-            fs_measurements.shoulderToWrist *= height_scale
-            fs_measurements.shoulderToElbow *= height_scale
-            print(f"    Custom height: {GARMENT_HEIGHT:.0f}cm (scale={height_scale:.2f})", flush=True)
+    fs_measurements = BodyMeasurements.from_mannequin_body(body, arm_data)
 
-        drafter = AbayaDrafter(fs_measurements)
-        pieces = drafter.draft_all()
+    if GARMENT_HEIGHT and abs(GARMENT_HEIGHT - 165.0) > 1.0:
+        height_scale = GARMENT_HEIGHT / fs_measurements.height
+        fs_measurements.height = GARMENT_HEIGHT
+        fs_measurements.waistToFloor *= height_scale
+        fs_measurements.waistToKnee *= height_scale
+        fs_measurements.hpsToWaistBack *= height_scale
+        fs_measurements.hpsToWaistFront *= height_scale
+        fs_measurements.shoulderToWrist *= height_scale
+        fs_measurements.shoulderToElbow *= height_scale
+        print(f"    Custom height: {GARMENT_HEIGHT:.0f}cm (scale={height_scale:.2f})", flush=True)
 
-        print(f"    FreeSewing drafted {len(pieces)} pieces:", flush=True)
-        for name, piece in pieces.items():
-            bounds = piece.get_bounds()
-            w = bounds[2] - bounds[0]
-            h = bounds[3] - bounds[1]
-            print(f"      {name}: {len(piece.vertices)} verts, {w:.1f} x {h:.1f} cm", flush=True)
+    drafter = AbayaDrafter(fs_measurements)
+    pieces = drafter.draft_all()
 
-        try:
-            job_id = os.path.basename(OUTPUT_PATH).split('.')[0]
-            svg_dir = os.path.join(os.path.dirname(OUTPUT_PATH), f"{job_id}_patterns")
-            os.makedirs(svg_dir, exist_ok=True)
-            exporter = FreeSewingSVGExporter(pieces)
-            svg_path = exporter.export_combined(os.path.join(svg_dir, "abaya_pattern.svg"))
-            print(f"    SVG exported: {svg_path}", flush=True)
-        except Exception as e:
-            print(f"    SVG export failed (non-critical): {e}", flush=True)
-    else:
-        print(f"    FreeSewing not available, using mannequin measurements only", flush=True)
+    print(f"    FreeSewing drafted {len(pieces)} pieces:", flush=True)
+    for name, piece in pieces.items():
+        bounds = piece.get_bounds()
+        w = bounds[2] - bounds[0]
+        h = bounds[3] - bounds[1]
+        print(f"      {name}: {len(piece.vertices)} verts, {w:.1f} x {h:.1f} cm", flush=True)
 
-    # Step 3: Build garment tube with MINIMAL ease
-    # Small ease keeps garment close to body for fast, clean cloth simulation
-    EASE = 0.015  # 1.5cm ease — start close to body
+    # Export SVG for visualization
+    try:
+        job_id = os.path.basename(OUTPUT_PATH).split('.')[0]
+        svg_dir = os.path.join(os.path.dirname(OUTPUT_PATH), f"{job_id}_patterns")
+        os.makedirs(svg_dir, exist_ok=True)
+        exporter = FreeSewingSVGExporter(pieces)
+        svg_path = exporter.export_combined(os.path.join(svg_dir, "abaya_pattern.svg"))
+        print(f"    SVG exported: {svg_path}", flush=True)
+    except Exception as e:
+        print(f"    SVG export failed (non-critical): {e}", flush=True)
 
-    neck_r = body["neck_r"]
-    shoulder_r = body["shoulder_r"]
-    armpit_r = body["armpit_r"]
-    upper_bust_r = body["upper_bust_r"]
-    bust_r = body["bust_r"]
-    underbust_r = body["underbust_r"]
-    waist_r = body["waist_r"]
-    low_waist_r = body["low_waist_r"]
-    hip_r = body["hip_r"]
-    low_hip_r = body["low_hip_r"]
-    upper_thigh_r = body["upper_thigh_r"]
-
-    chin_z = body["chin_z"]
-    neck_z = body["neck_z"]
+    # Step 3: Body reference measurements for panel positioning
     shoulder_z = body["shoulder_z"]
-    armpit_z = body["armpit_z"]
-    upper_bust_z = body["upper_bust_z"]
-    bust_z = body["bust_z"]
-    underbust_z = body["underbust_z"]
-    waist_z = body["waist_z"]
-    low_waist_z = body["low_waist_z"]
-    hip_z = body["hip_z"]
-    low_hip_z = body["low_hip_z"]
-    upper_thigh_z = body["upper_thigh_z"]
-    knee_z = body["knee_z"]
-    calf_z = body["calf_z"]
-    ankle_z = body["ankle_z"]
-    body_min_z = body["min_z"]
-
-    # Hem: A-line flare for abaya silhouette — generous flare
-    hem_radius = hip_r + 0.18
-    hem_z = body_min_z + 0.02
+    bust_r = body["bust_r"]
+    hip_r = body["hip_r"]
 
     print(f"    Height: {body['height']:.2f}m", flush=True)
-    print(f"    Torso: neck={neck_r:.3f}, shoulder={shoulder_r:.3f}, bust={bust_r:.3f}, "
-          f"waist={waist_r:.3f}, hip={hip_r:.3f}", flush=True)
-    print(f"    Arms: upper={arm_data['upper_arm_radius']:.3f}, elbow={arm_data['elbow_radius']:.3f}, "
+    print(f"    Torso radii: bust={bust_r:.3f}, hip={hip_r:.3f}", flush=True)
+    print(f"    Arms: upper={arm_data['upper_arm_radius']:.3f}, "
+          f"elbow={arm_data['elbow_radius']:.3f}, "
           f"wrist={arm_data['wrist_radius']:.3f}", flush=True)
 
-    segments = 48
-    sleeve_segments = 24
-    E = EASE
+    # =========================================================================
+    # Step 4: Create FLAT panels from FreeSewing pattern outlines
+    #
+    # Each pattern piece becomes a filled, subdivided flat mesh.
+    # Panels are positioned around the mannequin but NOT wrapped —
+    # Blender's sewing engine will pull them together.
+    # =========================================================================
+    print(f"    Creating flat panels from FreeSewing patterns...", flush=True)
 
-    # Neckline opening — should be close to actual neck size, NOT shoulder width
-    neckline_r = neck_r + E * 2  # Tight around neck
+    # Subdivision level: 3 gives good cloth density without excessive verts
+    subdiv = 3
 
-    ring_data = [
-        # Neckline — snug around neck
-        (chin_z - 0.02, neckline_r),
-        (neck_z + 0.02, neckline_r * 1.05),
-        (neck_z,        neckline_r * 1.10),
-        # Shoulders — garment widens to shoulder width
-        (shoulder_z + 0.02, (neckline_r + shoulder_r + E) / 2),  # transition
-        (shoulder_z,        shoulder_r + E),
-        # Armpit — transition to arm area
-        (armpit_z + 0.02,   armpit_r + E),
-        (armpit_z,          armpit_r + E),
-        # Bust
-        (upper_bust_z,      upper_bust_r + E),
-        (bust_z + 0.03,     bust_r + E * 1.3),
-        (bust_z,            bust_r + E * 1.3),
-        (bust_z - 0.03,     bust_r + E),
-        (underbust_z,       underbust_r + E),
-        # Waist — abaya is loose here, NOT fitted
-        ((underbust_z + waist_z)/2, max(underbust_r, waist_r) + E * 1.5),
-        (waist_z + 0.03,    max(waist_r, bust_r * 0.95) + E),
-        (waist_z,           max(waist_r, bust_r * 0.95) + E),
-        (low_waist_z,       max(low_waist_r, waist_r) + E),
-        # Hips
-        ((low_waist_z + hip_z)/2, max(low_waist_r, hip_r) + E),
-        (hip_z,             hip_r + E),
-        (low_hip_z,         max(low_hip_r, hip_r) + E),
-        # A-line from hips to hem — flares out for classic abaya shape
-        (upper_thigh_z,     hip_r + 0.04),
-        ((upper_thigh_z + knee_z)/2, hem_radius * 0.78),
-        (knee_z,            hem_radius * 0.86),
-        ((knee_z + calf_z)/2, hem_radius * 0.92),
-        (calf_z,            hem_radius * 0.97),
-        (ankle_z,           hem_radius),
-        (hem_z,             hem_radius * 1.02),
+    panel_objects = {}
+    panel_vert_ranges = {}  # Track vertex index ranges after joining
+
+    # Gap between panels and body — panels start flat near the body surface
+    body_gap = bust_r + 0.03  # Small gap outside body radius
+
+    for piece_name, piece in pieces.items():
+        outline = piece.vertices
+        if not outline or len(outline) < 3:
+            print(f"    [WARN] Skipping {piece_name}: not enough vertices", flush=True)
+            continue
+
+        panel = create_flat_panel_from_outline(piece_name, outline, subdivisions=subdiv)
+        if panel is None:
+            continue
+
+        # Position panel around the mannequin
+        # Panels are in XZ plane (Y=0). Move them to their positions.
+        bounds = piece.get_bounds()
+        panel_height_cm = bounds[3] - bounds[1]  # Height in cm
+        panel_top_z = shoulder_z + 0.05  # Start slightly above shoulders
+
+        if piece_name == "Front_Bodice":
+            # Front panel: offset in -Y (front of mannequin)
+            panel.location = (0, -body_gap, panel_top_z)
+            panel_objects[piece_name] = panel
+
+        elif piece_name == "Back_Bodice":
+            # Back panel: offset in +Y (back of mannequin), flip to face inward
+            panel.location = (0, body_gap, panel_top_z)
+            panel.rotation_euler = (0, 0, math.pi)  # Rotate 180° so inner face faces body
+            bpy.context.view_layer.objects.active = panel
+            panel.select_set(True)
+            bpy.ops.object.transform_apply(rotation=True)
+            panel_objects[piece_name] = panel
+
+        elif piece_name == "Left_Sleeve":
+            # Left sleeve: rotate 90° and position at left arm
+            arm_x = arm_data["left_arm_start"]
+            arm_z = arm_data["left_arm_z"]
+            panel.rotation_euler = (0, 0, math.radians(90))
+            bpy.context.view_layer.objects.active = panel
+            panel.select_set(True)
+            bpy.ops.object.transform_apply(rotation=True)
+            panel.location = (arm_x + 0.05, 0, arm_z + 0.05)
+            panel_objects[piece_name] = panel
+
+        elif piece_name == "Right_Sleeve":
+            # Right sleeve: rotate -90° and position at right arm
+            arm_x = arm_data["right_arm_start"]
+            arm_z = arm_data["right_arm_z"]
+            panel.rotation_euler = (0, 0, math.radians(-90))
+            bpy.context.view_layer.objects.active = panel
+            panel.select_set(True)
+            bpy.ops.object.transform_apply(rotation=True)
+            panel.location = (arm_x - 0.05, 0, arm_z + 0.05)
+            panel_objects[piece_name] = panel
+
+    if not panel_objects:
+        raise RuntimeError("No panels created from FreeSewing patterns")
+
+    print(f"    Created {len(panel_objects)} flat panels", flush=True)
+
+    # =========================================================================
+    # Step 5: Join all panels into a single mesh
+    # =========================================================================
+    print(f"    Joining panels...", flush=True)
+
+    # Track vertex ranges for each panel (needed for sewing edge creation)
+    vert_offset = 0
+    panel_bounds = {}
+
+    bpy.ops.object.select_all(action='DESELECT')
+    first_panel = None
+    for piece_name, panel in panel_objects.items():
+        panel.select_set(True)
+        if first_panel is None:
+            first_panel = panel
+
+        n_verts = len(panel.data.vertices)
+        vert_indices = set(range(vert_offset, vert_offset + n_verts))
+        y_offset = panel.location.y
+        panel_bounds[piece_name] = (vert_indices, y_offset)
+        vert_offset += n_verts
+
+    bpy.context.view_layer.objects.active = first_panel
+    bpy.ops.object.join()
+
+    obj = bpy.context.active_object
+    obj.name = "Abaya_Sewn"
+
+    print(f"    Joined mesh: {len(obj.data.vertices)} verts, "
+          f"{len(obj.data.polygons)} faces", flush=True)
+
+    # =========================================================================
+    # Step 6: Create sewing edges between panels
+    #
+    # Sewing edges are naked edges (no faces) connecting boundary vertices
+    # of adjacent panels. Blender's cloth sewing engine treats these as
+    # invisible threads that pull the panels together.
+    # =========================================================================
+    print(f"    Creating sewing edges...", flush=True)
+
+    seam_pairs = [
+        # Side seams: front ↔ back
+        ("Front_Bodice", "Back_Bodice", "side"),
+        # Armhole seams: sleeves ↔ bodice
+        ("Front_Bodice", "Left_Sleeve", "armhole"),
+        ("Front_Bodice", "Right_Sleeve", "armhole"),
+        ("Back_Bodice", "Left_Sleeve", "armhole"),
+        ("Back_Bodice", "Right_Sleeve", "armhole"),
     ]
 
-    bm = bmesh.new()
-    all_rings = []
+    sew_count = create_sewing_edges(obj, panel_bounds, seam_pairs)
 
-    for z_pos, radius in ring_data:
-        ring_verts = []
-        for i in range(segments):
-            angle = (i / segments) * 2 * math.pi
-            x = math.cos(angle) * radius
-            y = math.sin(angle) * radius
-            v = bm.verts.new((x, y, z_pos))
-            ring_verts.append(v)
-        all_rings.append(ring_verts)
-
-    bm.verts.ensure_lookup_table()
-
-    for r in range(len(all_rings) - 1):
-        ring1 = all_rings[r]
-        ring2 = all_rings[r + 1]
-        for i in range(segments):
-            v1 = ring1[i]
-            v2 = ring1[(i + 1) % segments]
-            v3 = ring2[(i + 1) % segments]
-            v4 = ring2[i]
-            bm.faces.new([v1, v2, v3, v4])
-
-    # Create sleeves — abaya sleeves are wider than arm but manageable for sim
-    print(f"    Creating auto-fitted sleeves...", flush=True)
-    # Abaya sleeves wider than arm but not so wide they cause collision issues
-    sleeve_multiplier = 1.8  # 1.8x arm width for flowing look
-    upper_r = arm_data["upper_arm_radius"] * sleeve_multiplier
-    elbow_r = arm_data["elbow_radius"] * sleeve_multiplier
-    wrist_r = arm_data["wrist_radius"] * sleeve_multiplier
-    # Minimum sleeve radii for proper drape
-    upper_r = max(upper_r, 0.08)  # At least 8cm radius
-    elbow_r = max(elbow_r, 0.065)
-    wrist_r = max(wrist_r, 0.05)
-
-    left_sleeve_rings = create_sleeve_mesh(
-        bm, "left",
-        arm_data["left_arm_start"], arm_data["left_arm_end"],
-        arm_data["left_arm_z"], upper_r, elbow_r, wrist_r, sleeve_segments
-    )
-    right_sleeve_rings = create_sleeve_mesh(
-        bm, "right",
-        arm_data["right_arm_start"], arm_data["right_arm_end"],
-        arm_data["right_arm_z"], upper_r, elbow_r, wrist_r, sleeve_segments
-    )
-
-    # Bridge sleeves to body
-    print(f"    Bridging sleeves to body...", flush=True)
-
-    def bridge_sleeve_to_body(sleeve_first_ring, body_rings, body_segments, sleeve_segs, side="left"):
-        sleeve_z = sleeve_first_ring[0].co.z
-        best_ring_idx = 0
-        best_dist = float('inf')
-        for idx, ring in enumerate(body_rings):
-            dist = abs(ring[0].co.z - sleeve_z)
-            if dist < best_dist:
-                best_dist = dist
-                best_ring_idx = idx
-        body_ring = body_rings[best_ring_idx]
-
-        if side == "left":
-            scored = sorted([(i, v.co.x) for i, v in enumerate(body_ring)], key=lambda t: -t[1])
-        else:
-            scored = sorted([(i, v.co.x) for i, v in enumerate(body_ring)], key=lambda t: t[1])
-
-        n_bridge = sleeve_segs
-        step = max(1, len(scored) // (n_bridge * 2))
-        bridge_indices = [scored[i * step][0] for i in range(n_bridge) if i * step < len(scored)]
-
-        n_actual = min(len(bridge_indices), len(sleeve_first_ring))
-        faces_created = 0
-        for i in range(n_actual - 1):
-            try:
-                bm.faces.new([body_ring[bridge_indices[i]], body_ring[bridge_indices[i+1]],
-                              sleeve_first_ring[i+1], sleeve_first_ring[i]])
-                faces_created += 1
-            except ValueError:
-                pass
-        print(f"      Bridged {side} sleeve: {faces_created} faces", flush=True)
-
-    if left_sleeve_rings:
-        bridge_sleeve_to_body(left_sleeve_rings[0], all_rings, segments, sleeve_segments, "left")
-    if right_sleeve_rings:
-        bridge_sleeve_to_body(right_sleeve_rings[0], all_rings, segments, sleeve_segments, "right")
-
-    # Create mesh object
-    mesh = bpy.data.meshes.new("Abaya_Mesh")
-    bm.to_mesh(mesh)
-    bm.free()
-
-    obj = bpy.data.objects.new("Abaya_Connected", mesh)
-    bpy.context.collection.objects.link(obj)
+    # UV unwrap the joined mesh
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
-
-    # Subdivide for smooth cloth sim
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.subdivide(number_cuts=5)
     bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02)
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
 
     # =========================================================================
-    # COLLISION-SAFE PRE-POSITIONING
-    #
-    # The garment tube is built from measured body radii + small ease (1.5cm).
-    # This ensures the tube starts very close to the body but NOT inside it.
-    #
-    # Unlike shrinkwrap (which makes sim 20x slower by pushing verts to
-    # collision surface), we simply verify the tube geometry is correct.
-    # The cloth sim handles the final draping from this close start position.
+    # Step 7: Pin neckline — only the collar holds the garment up
     # =========================================================================
-    print(f"    [PREFIT] Garment tube built with {E*100:.1f}cm ease from body", flush=True)
-    print(f"    [PREFIT] Upper body follows measurements, skirt flares for A-line", flush=True)
-
-    # Set up pinning — critical for proper draping
     max_z = max(v.co.z for v in obj.data.vertices)
     pin_group = obj.vertex_groups.new(name="Pin")
 
-    # Pin neckline (top 6cm) with full weight — MUST hold firmly
-    collar_threshold = max_z - 0.06
+    # Pin neckline (top 5% of garment) with full weight
+    collar_threshold = max_z - 0.04
     collar_verts = [v.index for v in obj.data.vertices if v.co.z >= collar_threshold]
     pin_group.add(collar_verts, 1.0, 'ADD')
 
-    # Pin shoulder zone (next 8cm down) with soft weight — lets fabric drape naturally
-    shoulder_bottom = max_z - 0.14
+    # Light shoulder pin for stability during sewing phase
+    shoulder_bottom = max_z - 0.10
     shoulder_verts = [v.index for v in obj.data.vertices
                       if shoulder_bottom <= v.co.z < collar_threshold]
-    pin_group.add(shoulder_verts, 0.3, 'ADD')
-
-    # NOTE: Chest and wrist pins REMOVED — they were suspending fabric mid-air
-    # The garment should hang freely from collar/shoulders under gravity
+    pin_group.add(shoulder_verts, 0.2, 'ADD')
 
     total = len(obj.data.vertices)
-    print(f"  [GARMENT] Abaya ready: {total} verts, "
-          f"{len(collar_verts)} collar + {len(shoulder_verts)} shoulder pinned", flush=True)
+    print(f"  [SEWING] Abaya ready: {total} verts, "
+          f"{len(collar_verts)} collar + {len(shoulder_verts)} shoulder pinned, "
+          f"{sew_count} sewing edges", flush=True)
 
     return obj
 
@@ -1410,6 +1564,36 @@ for panel in fabric_panels:
     cloth.settings.compression_damping = CLOTH_PARAMS["compression_damping"]
     cloth.settings.bending_damping = CLOTH_PARAMS["bending_damping"]
     cloth.settings.vertex_group_mass = "Pin"
+
+    # Enable sewing: naked edges between panels act as invisible threads
+    # that pull the flat panels together — mimics real garment stitching
+    if PATTERN_SOURCE == "freesewing":
+        sewing_enabled = False
+        # Blender API changed across versions:
+        # Blender 2.8-3.x: use_sewing_springs
+        # Blender 4.x+: use_sewing or sewing_force_max
+        for sew_attr in ['use_sewing_springs', 'use_sewing']:
+            if hasattr(cloth.settings, sew_attr):
+                setattr(cloth.settings, sew_attr, True)
+                sewing_enabled = True
+                print(f"  [SEW] Sewing enabled via {sew_attr}")
+                break
+
+        if hasattr(cloth.settings, 'sewing_force_max'):
+            cloth.settings.sewing_force_max = 15.0
+            print(f"  [SEW] Sewing force_max=15.0")
+        elif hasattr(cloth.settings, 'shrink_min'):
+            # Fallback: use shrink to pull fabric closer
+            cloth.settings.shrink_min = -0.3
+            print(f"  [SEW] Using shrink_min=-0.3 as sewing fallback")
+
+        if not sewing_enabled:
+            # If no sewing attribute exists, use shrink as alternative
+            if hasattr(cloth.settings, 'shrink_min'):
+                cloth.settings.shrink_min = -0.3
+                print(f"  [SEW] No sewing API found, using shrink_min=-0.3")
+            else:
+                print(f"  [SEW] WARNING: No sewing support in this Blender version")
 
     cloth.collision_settings.use_collision = True
     cloth.collision_settings.collision_quality = CLOTH_PARAMS["collision_quality"]

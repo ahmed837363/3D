@@ -46,10 +46,10 @@ PATTERN_COLOR = hex_to_rgba(params["pattern_color"])
 
 # ClothSDK parameters (passed from main.py via cloth_sdk module)
 CLOTH_PARAMS = params.get("cloth_params", {})
-FABRIC_DEFAULTS = {"mass": 0.15, "tension_stiffness": 5.0, "compression_stiffness": 5.0,
-                   "bending_stiffness": 0.005, "tension_damping": 5.0, "compression_damping": 5.0,
+FABRIC_DEFAULTS = {"mass": 0.15, "tension_stiffness": 5.0, "compression_stiffness": 0.0,
+                   "bending_stiffness": 0.005, "tension_damping": 5.0, "compression_damping": 0.0,
                    "bending_damping": 0.5, "friction": 5.0, "self_friction": 5.0,
-                   "collision_distance": 0.002, "self_collision_distance": 0.003,
+                   "collision_distance": 0.001, "self_collision_distance": 0.001,
                    "collision_quality": 5, "quality_steps": 10,
                    "roughness": 0.7, "sheen": 0.0, "transmission": 0.0}
 for k, v in FABRIC_DEFAULTS.items():
@@ -104,11 +104,11 @@ scene.frame_start = 1
 # Dynamic frame count: heavier fabrics need more simulation time to settle
 fabric_mass = CLOTH_PARAMS.get("mass", 0.15)
 if PATTERN_SOURCE == "freesewing":
-    # Sewing approach: wider panels need more time to pull together + settle
-    # Phase 1 (frames 1-60): sewing springs pull panels together
-    # Phase 2 (frames 60-100): gravity drapes fabric on body
-    # Phase 3 (frames 100-140): settling into final position
-    base_frames = 140
+    # Sewing approach: GENTLE sewing force needs more time to close seams
+    # Phase 1 (frames 1-80): sewing springs gently pull panels together
+    # Phase 2 (frames 80-140): gravity drapes fabric on body
+    # Phase 3 (frames 140-200): settling into final resting position
+    base_frames = 200
     extra_frames = int(fabric_mass * 50)
 else:
     base_frames = 80
@@ -349,12 +349,13 @@ if mannequin.name not in bpy.context.collection.objects:
 bpy.context.view_layer.objects.active = mannequin
 mannequin.select_set(True)
 
-# Add collision modifier — HIGH FRICTION is critical with minimal pinning
-# The fabric must grip the mannequin's shoulders via collision, not pins
+# Add collision modifier — HIGH FRICTION + THIN shell for natural draping
+# Thin collision shell lets fabric sit close to body surface
+# High friction prevents sliding off with minimal pinning
 bpy.ops.object.modifier_add(type='COLLISION')
-mannequin.collision.thickness_outer = 0.002
-mannequin.collision.thickness_inner = 0.002
-mannequin.collision.cloth_friction = 80.0  # High friction — fabric grips shoulders
+mannequin.collision.thickness_outer = 0.001  # 1mm — minimal push-back
+mannequin.collision.thickness_inner = 0.001
+mannequin.collision.cloth_friction = 80.0    # High friction — fabric grips shoulders
 
 # Verify mannequin exists
 print(f"  Mannequin: {mannequin.name}, {len(mannequin.data.vertices)} verts", flush=True)
@@ -1592,12 +1593,20 @@ for panel in fabric_panels:
     cloth.settings.quality = CLOTH_PARAMS["quality_steps"]
     cloth.settings.mass = CLOTH_PARAMS["mass"]
     cloth.settings.tension_stiffness = CLOTH_PARAMS["tension_stiffness"]
-    cloth.settings.compression_stiffness = CLOTH_PARAMS["compression_stiffness"]
     cloth.settings.bending_stiffness = CLOTH_PARAMS["bending_stiffness"]
     cloth.settings.tension_damping = CLOTH_PARAMS["tension_damping"]
-    cloth.settings.compression_damping = CLOTH_PARAMS["compression_damping"]
     cloth.settings.bending_damping = CLOTH_PARAMS["bending_damping"]
     cloth.settings.vertex_group_mass = "Pin"
+
+    # DEFLATION FIX: Zero compression to kill internal pressure
+    # Compression stiffness resists inward movement, trapping air inside
+    # the sewn garment like a balloon. Setting to 0 lets fabric collapse.
+    if PATTERN_SOURCE == "freesewing":
+        cloth.settings.compression_stiffness = 0.0
+        cloth.settings.compression_damping = 0.0
+    else:
+        cloth.settings.compression_stiffness = CLOTH_PARAMS["compression_stiffness"]
+        cloth.settings.compression_damping = CLOTH_PARAMS["compression_damping"]
 
     # Enable sewing: naked edges between panels act as invisible threads
     # that pull the flat panels together — mimics real garment stitching
@@ -1613,34 +1622,38 @@ for panel in fabric_panels:
                 print(f"  [SEW] Sewing enabled via {sew_attr}")
                 break
 
+        # DEFLATION FIX: Gentle sewing force prevents slam-bounce airbag
+        # 20.0 yanked panels into mannequin so fast they bounced off
+        # 2.0 pulls gently — seams close over ~80 frames, fabric settles
         if hasattr(cloth.settings, 'sewing_force_max'):
-            cloth.settings.sewing_force_max = 20.0  # Stronger pull for wider abaya panels
-            print(f"  [SEW] Sewing force_max=20.0")
+            cloth.settings.sewing_force_max = 2.0
+            print(f"  [SEW] Sewing force_max=2.0 (gentle)")
         elif hasattr(cloth.settings, 'shrink_min'):
-            # Fallback: use shrink to pull fabric closer
-            cloth.settings.shrink_min = -0.3
-            print(f"  [SEW] Using shrink_min=-0.3 as sewing fallback")
+            # Fallback: very mild shrink (NOT -0.3 which compresses violently)
+            cloth.settings.shrink_min = -0.05
+            print(f"  [SEW] Using shrink_min=-0.05 as gentle sewing fallback")
 
         if not sewing_enabled:
-            # If no sewing attribute exists, use shrink as alternative
             if hasattr(cloth.settings, 'shrink_min'):
-                cloth.settings.shrink_min = -0.3
-                print(f"  [SEW] No sewing API found, using shrink_min=-0.3")
+                cloth.settings.shrink_min = -0.05
+                print(f"  [SEW] No sewing API found, using shrink_min=-0.05")
             else:
                 print(f"  [SEW] WARNING: No sewing support in this Blender version")
 
     cloth.collision_settings.use_collision = True
     cloth.collision_settings.collision_quality = CLOTH_PARAMS["collision_quality"]
-    cloth.collision_settings.distance_min = CLOTH_PARAMS["collision_distance"]
+    # DEFLATION FIX: Minimal collision distance — 1mm invisible shell
+    cloth.collision_settings.distance_min = 0.001
     cloth.collision_settings.friction = CLOTH_PARAMS["friction"]
     cloth.collision_settings.use_self_collision = True
-    cloth.collision_settings.self_distance_min = CLOTH_PARAMS["self_collision_distance"]
+    cloth.collision_settings.self_distance_min = 0.001
     cloth.collision_settings.self_friction = CLOTH_PARAMS["self_friction"]
     cloth.point_cache.frame_start = 1
     cloth.point_cache.frame_end = scene.frame_end
     print(f"  ClothSDK: {panel.name} — mass={CLOTH_PARAMS['mass']}, "
           f"tension={CLOTH_PARAMS['tension_stiffness']}, "
-          f"bending={CLOTH_PARAMS['bending_stiffness']}")
+          f"bending={CLOTH_PARAMS['bending_stiffness']}, "
+          f"compression=0.0 (deflated)")
 
 
 # --- Ground ---

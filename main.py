@@ -429,12 +429,9 @@ class MainWindow(QMainWindow):
         self.height_label = QLabel("Height:")
         pattern_source_form.addRow(self.height_label, self.height_spin)
 
-        # Initially hide FreeSewing controls
-        self.freesewing_info_label.setVisible(False)
-        self.size_combo.setVisible(False)
-        self.size_label.setVisible(False)
-        self.height_spin.setVisible(False)
-        self.height_label.setVisible(False)
+        # Default to FreeSewing for better drape quality
+        self.pattern_source_combo.setCurrentIndex(1)
+        self._on_pattern_source_changed(1)
 
         controls_layout.addWidget(pattern_source_group)
 

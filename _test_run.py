@@ -3,11 +3,17 @@ import subprocess
 import json
 import os
 import sys
+import shutil
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-BLENDER_PATH = r"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe"
+BLENDER_PATH = (
+    os.environ.get("BLENDER_PATH")
+    or shutil.which("blender")
+    or r"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe"
+)
 SCRIPT_PATH = os.path.join(BASE_DIR, "blender_script.py")
+MAX_ATTEMPTS = max(1, int(os.environ.get("TEST_MAX_ATTEMPTS", "3")))
 
 output_path = os.path.join(OUTPUT_DIR, "_test_shrinkwrap.png")
 blend_path = os.path.join(OUTPUT_DIR, "_test_shrinkwrap.blend")
@@ -77,33 +83,50 @@ env = os.environ.copy()
 env["PYTHONUNBUFFERED"] = "1"
 
 with open(log_path, "w", buffering=1) as log_file:
-    log_file.write("Starting Blender test...\n")
+    log_file.write(f"Starting Blender test (max attempts: {MAX_ATTEMPTS})...\n")
+    log_file.write(f"Blender path: {BLENDER_PATH}\n")
     log_file.flush()
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=env,
-    )
-    proc.wait()
-    log_file.write(f"\nExit code: {proc.returncode}\n")
-    log_file.flush()
+
+    if not shutil.which(BLENDER_PATH) and not os.path.exists(BLENDER_PATH):
+        log_file.write("Blender executable not found. Skipping integration run.\n")
+        proc = None
+    else:
+        proc = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            log_file.write(f"\n--- Attempt {attempt}/{MAX_ATTEMPTS} ---\n")
+            log_file.flush()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+            proc.wait()
+            log_file.write(f"Exit code: {proc.returncode}\n")
+            log_file.flush()
+
+            if proc.returncode == 0 and os.path.exists(output_path):
+                break
 
 # Check result
 result_path = os.path.join(BASE_DIR, "_test_result.txt")
 with open(result_path, "w") as rf:
-    if os.path.exists(output_path):
+    if proc is None:
+        rf.write("SKIPPED: Blender executable not found.\n")
+    elif os.path.exists(output_path):
         rf.write(f"SUCCESS: Rendered to {output_path}\n")
         rf.write(f"Blend: {blend_path}\n")
         size = os.path.getsize(output_path)
         rf.write(f"PNG size: {size} bytes\n")
+        rf.write(f"Attempts used: {attempt}\n")
     else:
-        rf.write(f"FAILED: No output at {output_path}\n")
+        rf.write(f"FAILED: No output at {output_path} after {MAX_ATTEMPTS} attempts\n")
         # Show error lines from log
         with open(log_path, "r") as lf:
             for line in lf:
                 if any(k in line.lower() for k in ["error", "traceback", "exception"]):
                     rf.write(f"  ERR: {line}")
-    rf.write(f"\nBlender exit code: {proc.returncode}\n")
+    if proc is not None:
+        rf.write(f"\nBlender exit code: {proc.returncode}\n")

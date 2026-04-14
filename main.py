@@ -391,11 +391,11 @@ class MainWindow(QMainWindow):
 
         self.pattern_source_combo = QComboBox()
         self.pattern_source_combo.addItems([
-            "Procedural (Simple)",
+            "Tutorial (YouTube Method)",
             "FreeSewing (Accurate)"
         ])
         self.pattern_source_combo.setToolTip(
-            "Procedural: Quick tube/panel geometry\n"
+            "Tutorial: YouTube cloth plane sewing method\n"
             "FreeSewing: Measures MPFB mannequin for perfect fit"
         )
         self.pattern_source_combo.currentIndexChanged.connect(self._on_pattern_source_changed)

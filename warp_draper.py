@@ -436,8 +436,20 @@ def match_sewing_vertices(verts_a, boundary_a, verts_b, boundary_b,
     Returns list of (idx_a, idx_b) pairs.
     """
     pairs = []
+    max_z_a = None
+    max_z_b = None
+    if seam_type == "shoulder":
+        if boundary_a:
+            max_z_a = max(verts_a[i][2] for i in boundary_a)
+        if boundary_b:
+            max_z_b = max(verts_b[i][2] for i in boundary_b)
+
     for ia in boundary_a:
         pa = verts_a[ia]
+        if seam_type == "shoulder":
+            if max_z_a is None or pa[2] <= max_z_a - 0.15 or abs(pa[0]) <= 0.08:
+                continue
+
         best_ib = None
         best_dist = max_dist
         for ib in boundary_b:
@@ -458,6 +470,13 @@ def match_sewing_vertices(verts_a, boundary_a, verts_b, boundary_b,
                 total_dist = z_dist + abs(pa[0] - pb[0]) * 0.5
                 if total_dist < best_dist:
                     best_dist = total_dist
+                    best_ib = ib
+            elif seam_type == "shoulder":
+                if max_z_b is None or pb[2] <= max_z_b - 0.15 or abs(pb[0]) <= 0.08:
+                    continue
+                x_dist = abs(pa[0] - pb[0])
+                if x_dist < best_dist and x_dist < 0.1:
+                    best_dist = x_dist
                     best_ib = ib
 
         if best_ib is not None:

@@ -1,0 +1,219 @@
+Starting Blender test...
+[INFO ] services.locationservice ...............: Not adding link to MakeHuman user data, since neither explicit path nor auto-discovery is set in preferences.
+[INFO ] mpfb.init ..............................: Build info 20260225
+[INFO ] mpfb.init ..............................: MPFB initialization has finished.
+  [FreeSewing] Pattern system loaded
+PROGRESS:2%|Setting up scene...
+PROGRESS:5%|Building mannequin...
+  [MPFB] Not available (No module named 'mpfb'), trying alternative...
+  [MPFB] Trying operator method...
+Info: Human created. You can adjust the phenotype values on the modeling panel.
+  [MPFB] Applied female phenotype
+C:\Users\USER\Desktop\3D\blender_script.py:230: DeprecationWarning: 'Material.use_nodes' is expected to be removed in Blender 6.0
+  mat.use_nodes = True
+  [MPFB] Created via operator: 19158 verts
+  Mannequin: Mannequin, 19158 verts
+  Location: (0.0, 0.0, 0.0)
+PROGRESS:10%|Mannequin ready
+PROGRESS:11%|Creating fabric panels...
+  [WARP] Using Warp XPBD external draper
+PROGRESS:12%|Exporting mannequin for Warp...
+Info: File exported successfully
+  [WARP] Mannequin exported: C:\Users\USER\AppData\Local\Temp\warp_drape_kv1g91is\mannequin.obj
+PROGRESS:13%|Drafting FreeSewing patterns for Warp...
+    Body landmarks measured at 16 heights
+    [ARMS] Mesh X range: -0.50 to 0.50
+    [ARMS] Left arm: X=0.27 to 0.50 (length=0.23m), Z=0.98
+    [ARMS] Right arm: X=-0.27 to -0.50 (length=0.23m), Z=0.98
+    [ARMS] Radii (from shoulder 0.178): upper=0.050, elbow=0.043, wrist=0.032
+  [WARP] Drafted 4 pattern pieces
+    Front_Bodice: 142 verts, 108.4 x 137.9 cm
+    Back_Bodice: 138 verts, 108.4 x 136.5 cm
+    Left_Sleeve: 69 verts, 49.3 x 57.0 cm
+    Right_Sleeve: 69 verts, 49.3 x 57.0 cm
+    SVG exported: C:\Users\USER\Desktop\3D\output\_test_shrinkwrap_patterns\abaya_pattern.svg
+PROGRESS:14%|Preparing panel data for Warp...
+PROGRESS:15%|Running Warp XPBD simulation...
+  [WARP] Python: python
+  [WARP] Script: C:\Users\USER\Desktop\3D\warp_draper.py
+  [WARP] Params: C:\Users\USER\AppData\Local\Temp\warp_drape_kv1g91is\warp_params.json
+  ERROR: warp-lang not installed. pip install warp-lang
+  [WARP] ERROR: Warp draper exited with code 1
+  [WARP] Falling back to Blender cloth simulation...
+  Using FreeSewing (measuring MPFB mannequin)
+PROGRESS:12%|Creating abaya from mannequin measurements...
+  [FreeSewing] Auto-measuring mannequin...
+    Body landmarks measured at 16 heights
+    [ARMS] Mesh X range: -0.50 to 0.50
+    [ARMS] Left arm: X=0.27 to 0.50 (length=0.23m), Z=0.98
+    [ARMS] Right arm: X=-0.27 to -0.50 (length=0.23m), Z=0.98
+    [ARMS] Radii (from shoulder 0.178): upper=0.050, elbow=0.043, wrist=0.032
+    [EASE] Abaya ease applied: chest+30, waist+35, hips+30, sleeve+18
+    FreeSewing drafted 4 pieces:
+      Front_Bodice: 142 verts, 108.4 x 137.9 cm
+      Back_Bodice: 138 verts, 108.4 x 136.5 cm
+      Left_Sleeve: 69 verts, 49.3 x 57.0 cm
+      Right_Sleeve: 69 verts, 49.3 x 57.0 cm
+    SVG exported: C:\Users\USER\Desktop\3D\output\_test_shrinkwrap_patterns\abaya_pattern.svg
+    Height: 1.69m
+    Torso radii: bust=0.179, hip=0.183
+    Arms: upper=0.050, elbow=0.043, wrist=0.032
+    Creating flat panels from FreeSewing patterns...
+    [PANEL] Front_Bodice: 1384 verts, 2176 faces
+    [PANEL] Back_Bodice: 1362 verts, 2160 faces
+    [PANEL] Left_Sleeve: 675 verts, 1072 faces
+    [PANEL] Right_Sleeve: 675 verts, 1072 faces
+    Created 4 flat panels
+    Joining panels...
+    Joined mesh: 4096 verts, 6480 faces
+    Creating sewing edges...
+    [SEW] Found 1688 boundary edges
+    [SEW] Created 336 sewing edges
+    [MESH] Final mesh: 4096 verts, 6480 faces (post-sim SubSurf adds smoothness)
+  [SEWING] Abaya ready: 4096 verts, 220 top-pin verts, 336 sewing edges
+PROGRESS:15%|1 fabric panels ready
+PROGRESS:17%|Creating material...
+C:\Users\USER\Desktop\3D\blender_script.py:1887: DeprecationWarning: 'Material.use_nodes' is expected to be removed in Blender 6.0
+  mat.use_nodes = True
+PROGRESS:19%|Applying material & cloth physics...
+C:\Users\USER\Desktop\3D\blender_script.py:2059: DeprecationWarning: 'Material.use_nodes' is expected to be removed in Blender 6.0
+  gmat.use_nodes = True
+  [SEW] Sewing enabled via use_sewing_springs
+  [SEW] Sewing force_max=3.0
+  ClothSDK: Abaya_Sewn — mass=0.15, tension=2.5, bending=0.001, compression=0.0 (deflated)
+PROGRESS:22%|Simulating cloth physics...
+  [SIM] Starting simulation: 104 frames, 1 panels
+PROGRESS:22%|Frame 1/104
+PROGRESS:22%|Frame 2/104
+PROGRESS:23%|Frame 3/104
+PROGRESS:23%|Frame 4/104
+PROGRESS:24%|Frame 5/104
+PROGRESS:24%|Frame 6/104
+PROGRESS:25%|Frame 7/104
+PROGRESS:25%|Frame 8/104
+PROGRESS:26%|Frame 9/104
+PROGRESS:26%|Frame 10/104 (9.0 fps, ETA: 10s)
+PROGRESS:27%|Frame 11/104
+PROGRESS:27%|Frame 12/104
+PROGRESS:28%|Frame 13/104
+PROGRESS:28%|Frame 14/104
+PROGRESS:29%|Frame 15/104
+PROGRESS:29%|Frame 16/104
+PROGRESS:30%|Frame 17/104
+PROGRESS:30%|Frame 18/104
+PROGRESS:31%|Frame 19/104
+PROGRESS:31%|Frame 20/104 (6.9 fps, ETA: 12s)
+PROGRESS:32%|Frame 21/104
+PROGRESS:32%|Frame 22/104
+PROGRESS:33%|Frame 23/104
+PROGRESS:33%|Frame 24/104
+PROGRESS:34%|Frame 25/104
+PROGRESS:34%|Frame 26/104
+PROGRESS:35%|Frame 27/104
+PROGRESS:35%|Frame 28/104
+PROGRESS:36%|Frame 29/104
+PROGRESS:36%|Frame 30/104 (6.1 fps, ETA: 12s)
+PROGRESS:37%|Frame 31/104
+PROGRESS:37%|Frame 32/104
+PROGRESS:38%|Frame 33/104
+PROGRESS:38%|Frame 34/104
+PROGRESS:39%|Frame 35/104
+PROGRESS:39%|Frame 36/104
+PROGRESS:40%|Frame 37/104
+PROGRESS:40%|Frame 38/104
+PROGRESS:41%|Frame 39/104
+PROGRESS:41%|Frame 40/104 (6.2 fps, ETA: 10s)
+PROGRESS:42%|Frame 41/104
+PROGRESS:42%|Frame 42/104
+PROGRESS:43%|Frame 43/104
+PROGRESS:43%|Frame 44/104
+PROGRESS:44%|Frame 45/104
+PROGRESS:44%|Frame 46/104
+PROGRESS:45%|Frame 47/104
+PROGRESS:45%|Frame 48/104
+PROGRESS:46%|Frame 49/104
+PROGRESS:46%|Frame 50/104 (6.2 fps, ETA: 9s)
+PROGRESS:47%|Frame 51/104
+PROGRESS:47%|Frame 52/104
+PROGRESS:48%|Frame 53/104
+PROGRESS:49%|Frame 54/104
+PROGRESS:49%|Frame 55/104
+PROGRESS:50%|Frame 56/104
+PROGRESS:50%|Frame 57/104
+PROGRESS:51%|Frame 58/104
+PROGRESS:51%|Frame 59/104
+PROGRESS:52%|Frame 60/104 (6.2 fps, ETA: 7s)
+PROGRESS:52%|Frame 61/104
+PROGRESS:53%|Frame 62/104
+PROGRESS:53%|Frame 63/104
+PROGRESS:54%|Frame 64/104
+PROGRESS:54%|Frame 65/104
+PROGRESS:55%|Frame 66/104
+PROGRESS:55%|Frame 67/104
+PROGRESS:56%|Frame 68/104
+PROGRESS:56%|Frame 69/104
+PROGRESS:57%|Frame 70/104 (6.2 fps, ETA: 5s)
+PROGRESS:57%|Frame 71/104
+PROGRESS:58%|Frame 72/104
+PROGRESS:58%|Frame 73/104
+PROGRESS:59%|Frame 74/104
+PROGRESS:59%|Frame 75/104
+PROGRESS:60%|Frame 76/104
+PROGRESS:60%|Frame 77/104
+PROGRESS:61%|Frame 78/104
+PROGRESS:61%|Frame 79/104
+PROGRESS:62%|Frame 80/104 (6.3 fps, ETA: 4s)
+PROGRESS:62%|Frame 81/104
+PROGRESS:63%|Frame 82/104
+PROGRESS:63%|Frame 83/104
+PROGRESS:64%|Frame 84/104
+PROGRESS:64%|Frame 85/104
+PROGRESS:65%|Frame 86/104
+PROGRESS:65%|Frame 87/104
+PROGRESS:66%|Frame 88/104
+PROGRESS:66%|Frame 89/104
+PROGRESS:67%|Frame 90/104 (6.3 fps, ETA: 2s)
+PROGRESS:67%|Frame 91/104
+PROGRESS:68%|Frame 92/104
+PROGRESS:68%|Frame 93/104
+PROGRESS:69%|Frame 94/104
+PROGRESS:69%|Frame 95/104
+PROGRESS:70%|Frame 96/104
+PROGRESS:70%|Frame 97/104
+PROGRESS:71%|Frame 98/104
+PROGRESS:71%|Frame 99/104
+PROGRESS:72%|Frame 100/104 (6.3 fps, ETA: 1s)
+PROGRESS:72%|Frame 101/104
+PROGRESS:73%|Frame 102/104
+PROGRESS:73%|Frame 103/104
+PROGRESS:74%|Frame 104/104 (6.3 fps, ETA: 0s)
+PROGRESS:75%|Simulation complete (16.5s)
+  [SIM] Finished in 16.5 seconds
+  [SMOOTH] Adding subdivision surface for smooth rendering...
+    Abaya_Sewn: Added Solidify Modifier
+    Abaya_Sewn: Added subdivision surface (render level 2)
+  Scene objects: ['Mannequin', 'Abaya_Sewn', 'Ground']
+  Mannequin visible: Mannequin
+PROGRESS:76%|Setting up camera & lights...
+============================================================
+  RENDER ENGINE: EEVEE
+  SAMPLES: 32
+============================================================
+  [GPU] Rendering with EEVEE (BLENDER_EEVEE) — uses your RX 5700 XT
+============================================================
+C:\Users\USER\Desktop\3D\blender_script.py:2214: DeprecationWarning: 'World.use_nodes' is expected to be removed in Blender 6.0
+  scene.world.use_nodes = True
+PROGRESS:78%|Saving .blend file...
+Info: Saved as "_test_shrinkwrap.blend"
+  Saved: C:\Users\USER\Desktop\3D\output\_test_shrinkwrap.blend
+PROGRESS:80%|Rendering...
+00:24.015  render           | Saved: 'C:\Users\USER\Desktop\3D\output\_test_shrinkwrap.png'
+PROGRESS:100%|Done!
+Blender 5.0.1 (hash a3db93c5b259 built 2025-12-16 01:32:30)
+OBJ import of 'base.obj' took 12.73 ms
+Writing to C:\Users\USER\AppData\Local\Temp\warp_drape_kv1g91is\mannequin.obj
+OBJ export of 'mannequin.obj' took 7.36 ms
+
+Blender quit
+
+Exit code: 0

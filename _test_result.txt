@@ -1,0 +1,5 @@
+SUCCESS: Rendered to C:\Users\USER\Desktop\3D\output\_test_shrinkwrap.png
+Blend: C:\Users\USER\Desktop\3D\output\_test_shrinkwrap.blend
+PNG size: 1702712 bytes
+
+Blender exit code: 0

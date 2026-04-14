@@ -1442,112 +1442,164 @@ def create_freesewing_connected_abaya(pattern_data, mannequin_obj=None) -> objec
 
 def create_tutorial_abaya():
     import bmesh
-    mesh = bpy.data.meshes.new("Abaya")
+    mesh = bpy.data.meshes.new("Sixties_Dress")
     bm = bmesh.new()
-    
-    # Proportions: Abaya needs to be very loose and flowing
-    width = 0.98  # Width from center to end of sleeve (very wide/oversized)
-    height = 1.48 # From shoulder down to floor
-    nx = 40 # Increased resolution for better drape
-    nz = 60
-    
-    verts_front = {}
-    verts_back = {}
-    
-    y_front = -0.15 # Slightly wider starting gap for cleaner initial physics
-    y_back = 0.15
-    z_top = 1.45
-    
-    for ix in range(nx):
-        x = (ix / (nx - 1)) * width
-        for iz in range(nz):
-            z = z_top - (iz / (nz - 1)) * height
-            
-            # 1. Neck Hole: Precision circular-ish cutout
-            dist_to_neck = math.sqrt(x**2 + (z - 1.45)**2)
-            if dist_to_neck < 0.13: continue
-            
-            # 2. Body Shape: Luxurious "Batwing" taper
-            # Sleeve starts wide, curves down into the body
-            max_x_at_z = width
-            if z < 1.1: 
-                torso_width = 0.45 
-                t = (1.1 - z) / 1.1
-                max_x_at_z = width * (1 - t) + torso_width * t
-                # Add a bit of 'belly' to the curve
-                max_x_at_z += math.sin(t * math.pi) * 0.15
-                
-            if x > max_x_at_z: continue
-            
-            vf = bm.verts.new((x, y_front, z))
-            verts_front[(ix, iz)] = vf
-            
-            vb = bm.verts.new((x, y_back, z))
-            verts_back[(ix, iz)] = vb
-            
-    bm.verts.ensure_lookup_table()
-    
-    # Create faces
+
+    # Silhouette parameters (matches tutorial: knee length, flared skirt, thin straps)
+    body_height = 1.05
+    strap_height = 0.12
+    base_half_width = 0.20
+    flare_amount = 0.20   # adds volume toward hem for the 50s/60s flare
+    waist_cinch = 0.07    # pulls waist in slightly
+    strap_width = 0.08
+    nx = 22   # horizontal segments
+    nz = 34   # vertical segments
+
+    gap_y = 0.12
+    y_front = -gap_y / 2
+    y_back = gap_y / 2
+    z_top = 1.35
+    z_bottom = z_top - body_height
+
+    def width_at(t):
+        """Compute half-width at normalized height t (0=top,1=hem)."""
+        flare = flare_amount * t
+        waist = waist_cinch * math.exp(-((t - 0.45) / 0.2) ** 2)
+        return base_half_width + flare - waist
+
+    def build_panel(y_offset):
+        verts = {}
+        for ix in range(nx):
+            for iz in range(nz):
+                t = iz / (nz - 1)
+                z = z_top - t * body_height
+                w = width_at(t)
+                x = (ix / (nx - 1)) * w
+                verts[(ix, iz)] = bm.verts.new((x, y_offset, z))
+        return verts
+
+    verts_front = build_panel(y_front)
+    verts_back = build_panel(y_back)
+
+    # Raise strap columns to create shoulder straps
+    strap_columns = [ix for ix in range(nx) if (ix / (nx - 1)) * base_half_width <= strap_width]
+    for verts in (verts_front, verts_back):
+        for ix in strap_columns:
+            top_v = verts[(ix, 0)]
+            top_v.co.z += strap_height
+            if (ix, 1) in verts:
+                verts[(ix, 1)].co.z += strap_height * 0.6
+
+    # Faces for front and back
     for ix in range(nx - 1):
         for iz in range(nz - 1):
-            if (ix, iz) in verts_front and (ix+1, iz) in verts_front and (ix, iz+1) in verts_front and (ix+1, iz+1) in verts_front:
-                try: bm.faces.new([verts_front[(ix, iz)], verts_front[(ix+1, iz)], verts_front[(ix+1, iz+1)], verts_front[(ix, iz+1)]])
-                except: pass
-            if (ix, iz) in verts_back and (ix+1, iz) in verts_back and (ix, iz+1) in verts_back and (ix+1, iz+1) in verts_back:
-                try: bm.faces.new([verts_back[(ix, iz)], verts_back[(ix, iz+1)], verts_back[(ix+1, iz+1)], verts_back[(ix+1, iz)]])
-                except: pass
+            try:
+                bm.faces.new([
+                    verts_front[(ix, iz)],
+                    verts_front[(ix + 1, iz)],
+                    verts_front[(ix + 1, iz + 1)],
+                    verts_front[(ix, iz + 1)],
+                ])
+            except Exception:
+                pass
+            try:
+                bm.faces.new([
+                    verts_back[(ix, iz)],
+                    verts_back[(ix, iz + 1)],
+                    verts_back[(ix + 1, iz + 1)],
+                    verts_back[(ix + 1, iz)],
+                ])
+            except Exception:
+                pass
+
+    # Cut neckline and arm openings by deleting only faces (keep edges for sewing)
+    to_delete = []
+    for f in bm.faces:
+        max_z = max(v.co.z for v in f.verts)
+        max_x = max(v.co.x for v in f.verts)
+        min_z = min(v.co.z for v in f.verts)
+
+        # Neckline: open center top, leave straps intact
+        if max_z > z_top + strap_height - 0.02 and max_x <= strap_width + 0.005:
+            to_delete.append(f)
+            continue
+        if max_z > z_top - 0.02 and max_x <= strap_width * 0.75:
+            to_delete.append(f)
+            continue
+
+        # Armhole: clear upper outer corner
+        if max_z > z_top - 0.25 and max_x > width_at(0) * 0.85:
+            to_delete.append(f)
+            continue
+
+        # Hem: keep faces; sewing logic will leave it open
+        if min_z < z_bottom - 0.01:
+            to_delete.append(f)
+
+    bmesh.ops.delete(bm, geom=to_delete, context='FACES')
 
     bm.edges.ensure_lookup_table()
-    b_edges_f = [e for e in bm.edges if len(e.link_faces) <= 1 and e.verts[0].co.y == y_front]
-    b_edges_b = [e for e in bm.edges if len(e.link_faces) <= 1 and e.verts[0].co.y == y_back]
-    
+    b_edges_f = [e for e in bm.edges if len(e.link_faces) <= 1 and abs(e.verts[0].co.y - y_front) < 1e-5]
+    b_edges_b = [e for e in bm.edges if len(e.link_faces) <= 1 and abs(e.verts[0].co.y - y_back) < 1e-5]
+
     vf_bound = set()
     vb_bound = set()
-    for e in b_edges_f: vf_bound.update(e.verts)
-    for e in b_edges_b: vb_bound.update(e.verts)
-        
+    for e in b_edges_f:
+        vf_bound.update(e.verts)
+    for e in b_edges_b:
+        vb_bound.update(e.verts)
+
+    def should_sew(v):
+        if v.co.z <= z_bottom + 0.02:
+            return False  # hem stays open
+        if v.co.z >= z_top + strap_height - 0.01 and v.co.x <= strap_width + 0.01:
+            return True   # sew straps together
+        if v.co.z >= z_top - 0.03 and v.co.x < strap_width * 0.8:
+            return False  # neckline opening
+        if v.co.z >= z_top - 0.25 and v.co.x > width_at(0) * 0.85:
+            return False  # armhole opening
+        return True
+
     sew_count = 0
     for vf in vf_bound:
-        if vf.co.x < 0.01: continue # Center (opening or mirror plane)
-        if vf.co.z < z_top - height + 0.05: continue # Bottom hem
-        if vf.co.x < 0.15 and vf.co.z > 1.35: continue # Neck hole
-        if vf.co.x > width - 0.02: continue # Wrist opening
-        
-        # Everything else on the boundary should be sewn (including TOP and SIDE)
+        if not should_sew(vf):
+            continue
+
         best_vb = None
-        best_dist = 999
+        best_dist = 999.0
         for vb in vb_bound:
-            d = (vf.co.x - vb.co.x)**2 + (vf.co.z - vb.co.z)**2
+            d = (vf.co.x - vb.co.x) ** 2 + (vf.co.z - vb.co.z) ** 2
             if d < best_dist:
                 best_dist = d
                 best_vb = vb
-        
-        if best_vb and best_dist < 0.0001:
+
+        if best_vb and best_dist < 0.0004:
             try:
                 bm.edges.new([vf, best_vb])
                 sew_count += 1
-            except: pass
+            except Exception:
+                pass
 
     bm.to_mesh(mesh)
     bm.free()
-    
-    obj = bpy.data.objects.new("Abaya_Tutorial", mesh)
+
+    obj = bpy.data.objects.new("Sixties_Dress", mesh)
     bpy.context.collection.objects.link(obj)
-    
-    # Modifiers
+
     mirror = obj.modifiers.new(name="Mirror", type='MIRROR')
     mirror.use_clip = True
     mirror.use_axis[0] = True
-    
-    # Pinning: Only keep on shoulders
+
+    # Pin strap tops to stop slipping off the shoulders
     pin_group = obj.vertex_groups.new(name="Pin")
-    top_verts = [v.index for v in mesh.vertices if v.co.z >= 1.44 and abs(v.co.x) < 0.2]
-    pin_group.add(top_verts, 1.0, 'ADD')
-    
-    print(f"Created tutorial abaya with {sew_count} sewing edges")
-    return obj
-    
-    print(f"Created tutorial abaya with {sew_count} sewing edges")
+    pin_verts = [
+        v.index for v in mesh.vertices
+        if v.co.z >= z_top + strap_height - 0.01 and v.co.x <= strap_width + 0.04
+    ]
+    if pin_verts:
+        pin_group.add(pin_verts, 1.0, 'ADD')
+
+    print(f"Created 60s dress with {sew_count} sewing edges")
     return obj
 
 
@@ -1872,10 +1924,10 @@ if not USE_WARP or (USE_WARP and PATTERN_SOURCE != "freesewing"):
         print("  Using procedural pattern generation")
         sys.stdout.flush()
 
-        print("PROGRESS:11%|Creating tutorial abaya...")
+        print("PROGRESS:11%|Creating 60s dress panels...")
         sys.stdout.flush()
-        abaya = create_tutorial_abaya()
-        fabric_panels = [abaya]
+        dress = create_tutorial_abaya()
+        fabric_panels = [dress]
 
 print(f"PROGRESS:15%|{len(fabric_panels)} fabric panels ready")
 sys.stdout.flush()
